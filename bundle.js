@@ -5209,7 +5209,7 @@ class RandomAccessProvider extends _randomAccessStorage2.default {
     RandomAccessProvider.schedule(this, request);
   }
   _read(request) {
-//    RandomAccessProvider.read(this, request);
+    RandomAccessProvider.read(this, request);
   }
   _del(request) {
     RandomAccessProvider.schedule(this, request);
