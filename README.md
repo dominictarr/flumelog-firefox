@@ -1,0 +1,6 @@
+# flumelog-firefox
+
+
+## License
+
+MIT
