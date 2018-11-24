@@ -2752,48 +2752,10 @@ process.umask = function() { return 0; };
 
 },{}],7:[function(require,module,exports){
 (function (Buffer){
-window.Buffer = Buffer
-var hello = Buffer.from('hello', 'utf8')
-var codec = require('flumecodec')
-var RAMutableFile = require('random-access-idb-mutable-file')
-var FlumeLogRaf = require('flumelog-random-access-storage/inject')
-var toCompat = require('flumelog-random-access-storage/compat')
-
-var _log = console.log 
-
-console.log = function () {
-  var pre = document.createElement('pre')
-  pre.textContent = [].slice.call(arguments).map(JSON.stringify).join(' ')
-  document.body.appendChild(pre)
-}
-
-RAMutableFile.mount().then(function (RAMF) {
-  //var ramf = RAMF('test.txt')
-//  console.log(MF=ramf)
-  var FlumeLog = FlumeLogRaf(RAMF, require('lru_cache').LRUCache)
-
-  require('bench-flumelog')(function () {
-    var log = FlumeLog('/tmp/bench-flumelog-raf2', {
-      block: 1024*64,
-//      codec: codec.json
-    })
-    return toCompat(log)
-  }, null, null, function (obj) {
-    return obj
-  })
-
-})
-
-
-
-
-
-
-}).call(this,require("buffer").Buffer)
-},{"bench-flumelog":8,"buffer":2,"flumecodec":9,"flumelog-random-access-storage/compat":47,"flumelog-random-access-storage/inject":49,"lru_cache":13,"random-access-idb-mutable-file":58}],8:[function(require,module,exports){
-(function (Buffer){
 var pull = require('pull-stream')
 var paramap = require('pull-paramap')
+
+var TIME = 10e3
 
 var a = []
 while(a.length < 1000) {
@@ -2821,7 +2783,7 @@ function print (str) {
     return 'string' === typeof s || Number.isInteger(s) ? s : Math.floor(s*1000)/1000
   }).join(', ')
 
-  if('undefined' !== typeof window) {
+  if('undefined' !== typeof window && document.body) {
     var pre = document.createElement('pre')
     pre.textContent = str
     document.body.appendChild(pre)
@@ -2829,12 +2791,12 @@ function print (str) {
   console.log(str)
 }
 
-module.exports = function (createLog, N, T) {
+module.exports = function (createLog, N, T, encode) {
 
   var start = Date.now()
   var log = createLog()
   var seqs = []
-
+  encode = encode || function (e) { return e }
   print('name, ops/second, mb/second, ops, total-mb, seconds')
 
   log.since.once(function () {
@@ -2850,11 +2812,13 @@ module.exports = function (createLog, N, T) {
         c ++
         total += length(data)
 //        return cb()
-        log.append(data, cb)
-      }, 4*1024),
+//        console.log('append', c)
+        log.append(encode(data), cb)
+      }, 16),
       pull.drain(function () {
-        if(Date.now() - start > 10e3) return false
-      }, function () {
+        if(Date.now() - start > TIME) return false
+      }, function (err) {
+        if(err && err != true) throw err
         var time = (Date.now() - start)/1000
         print('append', c/time, (total/MB)/time, c, total/MB, time)
         next2()
@@ -2870,8 +2834,9 @@ module.exports = function (createLog, N, T) {
         c++
         total += length(d)
         seqs.push(d.seq)
-        if(Date.now() - start > 10e3) return false
-      }, function () {
+        if(Date.now() - start > TIME) return false
+      }, function (err) {
+        if(err && err!=true) throw err
         var time = (Date.now() - start)/1000
         print('stream', c/time, (total/MB)/time, c, total/MB, time)
         next2nocache()
@@ -2887,7 +2852,7 @@ module.exports = function (createLog, N, T) {
         c++
         total += length(d)
         seqs.push(d.seq)
-        if(Date.now() - start > 10e3) return false
+        if(Date.now() - start > TIME) return false
       }, function () {
         var time = (Date.now() - start)/1000
         print('stream no cache', c/time, (total/MB)/time, c, total/MB, time)
@@ -2907,7 +2872,7 @@ module.exports = function (createLog, N, T) {
           c++;
           total += length(d)
           seqs.push(d.seq)
-          if(Date.now() - start > 10e3) return false
+          if(Date.now() - start > TIME) return false
         }, function () {
           if(--n) return
           var time = (Date.now() - start)/1000
@@ -2929,7 +2894,7 @@ module.exports = function (createLog, N, T) {
       pull.drain(function (d) {
         c++
         total += length(d)
-        if(Date.now() - start > 10e3) return false
+        if(Date.now() - start > TIME) return false
       }, function () {
         var time = (Date.now() - start)/1000
         print('random', c/time, (total/MB)/time, c, total/MB, time)
@@ -2940,12 +2905,832 @@ module.exports = function (createLog, N, T) {
 
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":2,"pull-paramap":14,"pull-stream":15}],9:[function(require,module,exports){
+},{"buffer":2,"pull-paramap":9,"pull-stream":10}],8:[function(require,module,exports){
+
+
+module.exports = function (fn) {
+  var active = false, called = 0
+  return function () {
+    called = true
+    if(!active) {
+      active = true
+      while(called) {
+        called = false
+        fn()
+      }
+      active = false
+    }
+  }
+}
+
+
+
+
+
+
+
+
+
+},{}],9:[function(require,module,exports){
+var looper = require('looper')
+module.exports = function (map, width, inOrder) {
+  inOrder = inOrder === undefined ? true : inOrder
+  var reading = false, abort
+  return function (read) {
+    var i = 0, j = 0, last = 0
+    var seen = [], started = false, ended = false, _cb, error
+
+    function drain () {
+      if(_cb) {
+        var cb = _cb
+        if(error) {
+          _cb = null
+          return cb(error)
+        }
+        if(Object.hasOwnProperty.call(seen, j)) {
+          _cb = null
+          var data = seen[j]; delete seen[j]; j++
+          cb(null, data)
+          if(width) start()
+        } else if(j >= last && ended) {
+          _cb = null
+          cb(ended)
+        }
+      }
+    }
+
+    var start = looper(function () {
+      started = true
+      if(ended) return drain()
+      if(reading || width && (i - width >= j)) return
+      reading = true
+      read(abort, function (end, data) {
+        reading = false
+        if(end) {
+          last = i; ended = end
+          drain()
+        } else {
+          var k = i++
+
+          map(data, function (err, data) {
+            if (inOrder) seen[k] = data
+            else seen.push(data)
+            if(err) error = err
+            drain()
+          })
+
+          if(!ended)
+            start()
+
+        }
+      })
+    })
+
+    return function (_abort, cb) {
+      if(_abort)
+        read(ended = abort = _abort, function (err) {
+          if(cb) return cb(err)
+        })
+      else {
+        _cb = cb
+        if(!started) start()
+        drain()
+      }
+    }
+  }
+}
+
+
+},{"looper":8}],10:[function(require,module,exports){
+'use strict'
+
+var sources  = require('./sources')
+var sinks    = require('./sinks')
+var throughs = require('./throughs')
+
+exports = module.exports = require('./pull')
+
+exports.pull = exports
+
+for(var k in sources)
+  exports[k] = sources[k]
+
+for(var k in throughs)
+  exports[k] = throughs[k]
+
+for(var k in sinks)
+  exports[k] = sinks[k]
+
+
+},{"./pull":11,"./sinks":16,"./sources":23,"./throughs":32}],11:[function(require,module,exports){
+'use strict'
+
+module.exports = function pull (a) {
+  var length = arguments.length
+  if (typeof a === 'function' && a.length === 1) {
+    var args = new Array(length)
+    for(var i = 0; i < length; i++)
+      args[i] = arguments[i]
+    return function (read) {
+      if (args == null) {
+        throw new TypeError("partial sink should only be called once!")
+      }
+
+      // Grab the reference after the check, because it's always an array now
+      // (engines like that kind of consistency).
+      var ref = args
+      args = null
+
+      // Prioritize common case of small number of pulls.
+      switch (length) {
+      case 1: return pull(read, ref[0])
+      case 2: return pull(read, ref[0], ref[1])
+      case 3: return pull(read, ref[0], ref[1], ref[2])
+      case 4: return pull(read, ref[0], ref[1], ref[2], ref[3])
+      default:
+        ref.unshift(read)
+        return pull.apply(null, ref)
+      }
+    }
+  }
+
+  var read = a
+
+  if (read && typeof read.source === 'function') {
+    read = read.source
+  }
+
+  for (var i = 1; i < length; i++) {
+    var s = arguments[i]
+    if (typeof s === 'function') {
+      read = s(read)
+    } else if (s && typeof s === 'object') {
+      s.sink(read)
+      read = s.source
+    }
+  }
+
+  return read
+}
+
+},{}],12:[function(require,module,exports){
+'use strict'
+
+var reduce = require('./reduce')
+
+module.exports = function collect (cb) {
+  return reduce(function (arr, item) {
+    arr.push(item)
+    return arr
+  }, [], cb)
+}
+
+},{"./reduce":19}],13:[function(require,module,exports){
+'use strict'
+
+var reduce = require('./reduce')
+
+module.exports = function concat (cb) {
+  return reduce(function (a, b) {
+    return a + b
+  }, '', cb)
+}
+
+},{"./reduce":19}],14:[function(require,module,exports){
+'use strict'
+
+module.exports = function drain (op, done) {
+  var read, abort
+
+  function sink (_read) {
+    read = _read
+    if(abort) return sink.abort()
+    //this function is much simpler to write if you
+    //just use recursion, but by using a while loop
+    //we do not blow the stack if the stream happens to be sync.
+    ;(function next() {
+        var loop = true, cbed = false
+        while(loop) {
+          cbed = false
+          read(null, function (end, data) {
+            cbed = true
+            if(end = end || abort) {
+              loop = false
+              if(done) done(end === true ? null : end)
+              else if(end && end !== true)
+                throw end
+            }
+            else if(op && false === op(data) || abort) {
+              loop = false
+              read(abort || true, done || function () {})
+            }
+            else if(!loop){
+              next()
+            }
+          })
+          if(!cbed) {
+            loop = false
+            return
+          }
+        }
+      })()
+  }
+
+  sink.abort = function (err, cb) {
+    if('function' == typeof err)
+      cb = err, err = true
+    abort = err || true
+    if(read) return read(abort, cb || function () {})
+  }
+
+  return sink
+}
+
+},{}],15:[function(require,module,exports){
+'use strict'
+
+function id (e) { return e }
+var prop = require('../util/prop')
+var drain = require('./drain')
+
+module.exports = function find (test, cb) {
+  var ended = false
+  if(!cb)
+    cb = test, test = id
+  else
+    test = prop(test) || id
+
+  return drain(function (data) {
+    if(test(data)) {
+      ended = true
+      cb(null, data)
+    return false
+    }
+  }, function (err) {
+    if(ended) return //already called back
+    cb(err === true ? null : err, null)
+  })
+}
+
+
+
+
+
+},{"../util/prop":39,"./drain":14}],16:[function(require,module,exports){
+'use strict'
+
+module.exports = {
+  drain: require('./drain'),
+  onEnd: require('./on-end'),
+  log: require('./log'),
+  find: require('./find'),
+  reduce: require('./reduce'),
+  collect: require('./collect'),
+  concat: require('./concat')
+}
+
+
+},{"./collect":12,"./concat":13,"./drain":14,"./find":15,"./log":17,"./on-end":18,"./reduce":19}],17:[function(require,module,exports){
+'use strict'
+
+var drain = require('./drain')
+
+module.exports = function log (done) {
+  return drain(function (data) {
+    console.log(data)
+  }, done)
+}
+
+},{"./drain":14}],18:[function(require,module,exports){
+'use strict'
+
+var drain = require('./drain')
+
+module.exports = function onEnd (done) {
+  return drain(null, done)
+}
+
+},{"./drain":14}],19:[function(require,module,exports){
+'use strict'
+
+var drain = require('./drain')
+
+module.exports = function reduce (reducer, acc, cb ) {
+  if(!cb) cb = acc, acc = null
+  var sink = drain(function (data) {
+    acc = reducer(acc, data)
+  }, function (err) {
+    cb(err, acc)
+  })
+  if (arguments.length === 2)
+    return function (source) {
+      source(null, function (end, data) {
+        //if ended immediately, and no initial...
+        if(end) return cb(end === true ? null : end)
+        acc = data; sink(source)
+      })
+    }
+  else
+    return sink
+}
+
+},{"./drain":14}],20:[function(require,module,exports){
+'use strict'
+
+module.exports = function count (max) {
+  var i = 0; max = max || Infinity
+  return function (end, cb) {
+    if(end) return cb && cb(end)
+    if(i > max)
+      return cb(true)
+    cb(null, i++)
+  }
+}
+
+
+
+},{}],21:[function(require,module,exports){
+'use strict'
+//a stream that ends immediately.
+module.exports = function empty () {
+  return function (abort, cb) {
+    cb(true)
+  }
+}
+
+},{}],22:[function(require,module,exports){
+'use strict'
+//a stream that errors immediately.
+module.exports = function error (err) {
+  return function (abort, cb) {
+    cb(err)
+  }
+}
+
+
+},{}],23:[function(require,module,exports){
+'use strict'
+module.exports = {
+  keys: require('./keys'),
+  once: require('./once'),
+  values: require('./values'),
+  count: require('./count'),
+  infinite: require('./infinite'),
+  empty: require('./empty'),
+  error: require('./error')
+}
+
+},{"./count":20,"./empty":21,"./error":22,"./infinite":24,"./keys":25,"./once":26,"./values":27}],24:[function(require,module,exports){
+'use strict'
+module.exports = function infinite (generate) {
+  generate = generate || Math.random
+  return function (end, cb) {
+    if(end) return cb && cb(end)
+    return cb(null, generate())
+  }
+}
+
+
+
+},{}],25:[function(require,module,exports){
+'use strict'
+var values = require('./values')
+module.exports = function (object) {
+  return values(Object.keys(object))
+}
+
+
+
+},{"./values":27}],26:[function(require,module,exports){
+'use strict'
+var abortCb = require('../util/abort-cb')
+
+module.exports = function once (value, onAbort) {
+  return function (abort, cb) {
+    if(abort)
+      return abortCb(cb, abort, onAbort)
+    if(value != null) {
+      var _value = value; value = null
+      cb(null, _value)
+    } else
+      cb(true)
+  }
+}
+
+
+
+},{"../util/abort-cb":38}],27:[function(require,module,exports){
+'use strict'
+var abortCb = require('../util/abort-cb')
+
+module.exports = function values (array, onAbort) {
+  if(!array)
+    return function (abort, cb) {
+      if(abort) return abortCb(cb, abort, onAbort)
+      return cb(true)
+    }
+  if(!Array.isArray(array))
+    array = Object.keys(array).map(function (k) {
+      return array[k]
+    })
+  var i = 0
+  return function (abort, cb) {
+    if(abort)
+      return abortCb(cb, abort, onAbort)
+    if(i >= array.length)
+      cb(true)
+    else
+      cb(null, array[i++])
+  }
+}
+
+},{"../util/abort-cb":38}],28:[function(require,module,exports){
+'use strict'
+
+function id (e) { return e }
+var prop = require('../util/prop')
+
+module.exports = function asyncMap (map) {
+  if(!map) return id
+  map = prop(map)
+  var busy = false, abortCb, aborted
+  return function (read) {
+    return function next (abort, cb) {
+      if(aborted) return cb(aborted)
+      if(abort) {
+        aborted = abort
+        if(!busy) read(abort, function (err) {
+          //incase the source has already ended normally,
+          //we should pass our own error.
+          cb(abort)
+        })
+        else read(abort, function (err) {
+          //if we are still busy, wait for the mapper to complete.
+          if(busy) abortCb = cb
+          else cb(abort)
+        })
+      }
+      else
+        read(null, function (end, data) {
+          if(end) cb(end)
+          else if(aborted) cb(aborted)
+          else {
+            busy = true
+            map(data, function (err, data) {
+              busy = false
+              if(aborted) {
+                cb(aborted)
+                abortCb && abortCb(aborted)
+              }
+              else if(err) next (err, cb)
+              else cb(null, data)
+            })
+          }
+        })
+    }
+  }
+}
+
+
+
+
+
+
+
+
+},{"../util/prop":39}],29:[function(require,module,exports){
+'use strict'
+
+var tester = require('../util/tester')
+var filter = require('./filter')
+
+module.exports = function filterNot (test) {
+  test = tester(test)
+  return filter(function (data) { return !test(data) })
+}
+
+},{"../util/tester":40,"./filter":30}],30:[function(require,module,exports){
+'use strict'
+
+var tester = require('../util/tester')
+
+module.exports = function filter (test) {
+  //regexp
+  test = tester(test)
+  return function (read) {
+    return function next (end, cb) {
+      var sync, loop = true
+      while(loop) {
+        loop = false
+        sync = true
+        read(end, function (end, data) {
+          if(!end && !test(data))
+            return sync ? loop = true : next(end, cb)
+          cb(end, data)
+        })
+        sync = false
+      }
+    }
+  }
+}
+
+
+},{"../util/tester":40}],31:[function(require,module,exports){
+'use strict'
+
+var values = require('../sources/values')
+var once = require('../sources/once')
+
+//convert a stream of arrays or streams into just a stream.
+module.exports = function flatten () {
+  return function (read) {
+    var _read
+    return function (abort, cb) {
+      if (abort) { //abort the current stream, and then stream of streams.
+        _read ? _read(abort, function(err) {
+          read(err || abort, cb)
+        }) : read(abort, cb)
+      }
+      else if(_read) nextChunk()
+      else nextStream()
+
+      function nextChunk () {
+        _read(null, function (err, data) {
+          if (err === true) nextStream()
+          else if (err) {
+            read(true, function(abortErr) {
+              // TODO: what do we do with the abortErr?
+              cb(err)
+            })
+          }
+          else cb(null, data)
+        })
+      }
+      function nextStream () {
+        _read = null
+        read(null, function (end, stream) {
+          if(end)
+            return cb(end)
+          if(Array.isArray(stream) || stream && 'object' === typeof stream)
+            stream = values(stream)
+          else if('function' != typeof stream)
+            stream = once(stream)
+          _read = stream
+          nextChunk()
+        })
+      }
+    }
+  }
+}
+
+
+},{"../sources/once":26,"../sources/values":27}],32:[function(require,module,exports){
+'use strict'
+
+module.exports = {
+  map: require('./map'),
+  asyncMap: require('./async-map'),
+  filter: require('./filter'),
+  filterNot: require('./filter-not'),
+  through: require('./through'),
+  take: require('./take'),
+  unique: require('./unique'),
+  nonUnique: require('./non-unique'),
+  flatten: require('./flatten')
+}
+
+
+
+
+},{"./async-map":28,"./filter":30,"./filter-not":29,"./flatten":31,"./map":33,"./non-unique":34,"./take":35,"./through":36,"./unique":37}],33:[function(require,module,exports){
+'use strict'
+
+function id (e) { return e }
+var prop = require('../util/prop')
+
+module.exports = function map (mapper) {
+  if(!mapper) return id
+  mapper = prop(mapper)
+  return function (read) {
+    return function (abort, cb) {
+      read(abort, function (end, data) {
+        try {
+        data = !end ? mapper(data) : null
+        } catch (err) {
+          return read(err, function () {
+            return cb(err)
+          })
+        }
+        cb(end, data)
+      })
+    }
+  }
+}
+
+},{"../util/prop":39}],34:[function(require,module,exports){
+'use strict'
+
+var unique = require('./unique')
+
+//passes an item through when you see it for the second time.
+module.exports = function nonUnique (field) {
+  return unique(field, true)
+}
+
+},{"./unique":37}],35:[function(require,module,exports){
+'use strict'
+
+//read a number of items and then stop.
+module.exports = function take (test, opts) {
+  opts = opts || {}
+  var last = opts.last || false // whether the first item for which !test(item) should still pass
+  var ended = false
+  if('number' === typeof test) {
+    last = true
+    var n = test; test = function () {
+      return --n
+    }
+  }
+
+  return function (read) {
+
+    function terminate (cb) {
+      read(true, function (err) {
+        last = false; cb(err || true)
+      })
+    }
+
+    return function (end, cb) {
+      if(ended && !end) last ? terminate(cb) : cb(ended)
+      else if(ended = end) read(ended, cb)
+      else
+        read(null, function (end, data) {
+          if(ended = ended || end) {
+            //last ? terminate(cb) :
+            cb(ended)
+          }
+          else if(!test(data)) {
+            ended = true
+            last ? cb(null, data) : terminate(cb)
+          }
+          else
+            cb(null, data)
+        })
+    }
+  }
+}
+
+},{}],36:[function(require,module,exports){
+'use strict'
+
+//a pass through stream that doesn't change the value.
+module.exports = function through (op, onEnd) {
+  var a = false
+
+  function once (abort) {
+    if(a || !onEnd) return
+    a = true
+    onEnd(abort === true ? null : abort)
+  }
+
+  return function (read) {
+    return function (end, cb) {
+      if(end) once(end)
+      return read(end, function (end, data) {
+        if(!end) op && op(data)
+        else once(end)
+        cb(end, data)
+      })
+    }
+  }
+}
+
+},{}],37:[function(require,module,exports){
+'use strict'
+
+function id (e) { return e }
+var prop = require('../util/prop')
+var filter = require('./filter')
+
+//drop items you have already seen.
+module.exports = function unique (field, invert) {
+  field = prop(field) || id
+  var seen = {}
+  return filter(function (data) {
+    var key = field(data)
+    if(seen[key]) return !!invert //false, by default
+    else seen[key] = true
+    return !invert //true by default
+  })
+}
+
+
+},{"../util/prop":39,"./filter":30}],38:[function(require,module,exports){
+module.exports = function abortCb(cb, abort, onAbort) {
+  cb(abort)
+  onAbort && onAbort(abort === true ? null: abort)
+  return
+}
+
+
+},{}],39:[function(require,module,exports){
+module.exports = function prop (key) {
+  return key && (
+    'string' == typeof key
+    ? function (data) { return data[key] }
+    : 'object' === typeof key && 'function' === typeof key.exec //regexp
+    ? function (data) { var v = key.exec(data); return v && v[0] }
+    : key
+  )
+}
+
+},{}],40:[function(require,module,exports){
+var prop = require('./prop')
+
+function id (e) { return e }
+
+module.exports = function tester (test) {
+  return (
+    'object' === typeof test && 'function' === typeof test.test //regexp
+    ? function (data) { return test.test(data) }
+    : prop (test) || id
+  )
+}
+
+},{"./prop":39}],41:[function(require,module,exports){
+(function (Buffer){
+window.Buffer = Buffer
+var hello = Buffer.from('hello', 'utf8')
+var codec = require('flumecodec')
+var RACF = require('random-access-chrome-file')
+
+//var RAMutableFile = require('random-access-idb-mutable-file')
+var FlumeLogRaf = require('flumelog-random-access-storage/inject')
+var toCompat = require('flumelog-random-access-storage/compat')
+
+window.onload= function () {
+//var _log = console.log 
+//
+//console.log = function () {
+//  var pre = document.createElement('pre')
+//  pre.textContent = [].slice.call(arguments).map(JSON.stringify).join(' ')
+//  document.body.appendChild(pre)
+//}
+
+//RAMutableFile.mount().then(function (RAMF) {
+  //var ramf = RAMF('test.txt')
+//  console.log(MF=ramf)
+  var FlumeLog = FlumeLogRaf(RACF, require('lru_cache').LRUCache)
+
+  require('bench-flumelog')(function () {
+    var log = FlumeLog('./bench-flumelog-raf.txt', {
+      block: 1024*64,
+//      codec: codec.json
+    })
+    return toCompat(log)
+  }, null, null, function (obj) {
+    return obj
+  })
+
+//})
+
+
+
+
+}
+
+}).call(this,require("buffer").Buffer)
+},{"bench-flumelog":7,"buffer":2,"flumecodec":42,"flumelog-random-access-storage/compat":50,"flumelog-random-access-storage/inject":52,"lru_cache":46,"random-access-chrome-file":47}],42:[function(require,module,exports){
 
 
 module.exports = require('level-codec/lib/encodings')
 
-},{"level-codec/lib/encodings":10}],10:[function(require,module,exports){
+},{"level-codec/lib/encodings":44}],43:[function(require,module,exports){
+if (typeof Object.create === 'function') {
+  // implementation from standard node.js 'util' module
+  module.exports = function inherits(ctor, superCtor) {
+    ctor.super_ = superCtor
+    ctor.prototype = Object.create(superCtor.prototype, {
+      constructor: {
+        value: ctor,
+        enumerable: false,
+        writable: true,
+        configurable: true
+      }
+    });
+  };
+} else {
+  // old school shim for old browsers
+  module.exports = function inherits(ctor, superCtor) {
+    ctor.super_ = superCtor
+    var TempCtor = function () {}
+    TempCtor.prototype = superCtor.prototype
+    ctor.prototype = new TempCtor()
+    ctor.prototype.constructor = ctor
+  }
+}
+
+},{}],44:[function(require,module,exports){
 (function (Buffer){
 
 exports.utf8 = exports['utf-8'] = {
@@ -3027,33 +3812,7 @@ function isBinary(data){
 
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":2}],11:[function(require,module,exports){
-
-
-module.exports = function (fn) {
-  var active = false, called = 0
-  return function () {
-    called = true
-    if(!active) {
-      active = true
-      while(called) {
-        called = false
-        fn()
-      }
-      active = false
-    }
-  }
-}
-
-
-
-
-
-
-
-
-
-},{}],12:[function(require,module,exports){
+},{"buffer":2}],45:[function(require,module,exports){
 /**
  * A doubly linked list-based Least Recently Used (LRU) cache. Will keep most
  * recently used items while discarding least recently used items when its limit
@@ -3187,7 +3946,7 @@ if (typeof this === 'object') {
   this.LRUCache = LRUCache
 }
 
-},{}],13:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 var LRUCache = require('./core').LRUCache
 
 // ----------------------------------------------------------------------------
@@ -3337,1970 +4096,268 @@ if (typeof this === 'object') {
   this.LRUCache = LRUCache
 }
 
-},{"./core":12}],14:[function(require,module,exports){
-var looper = require('looper')
-module.exports = function (map, width, inOrder) {
-  inOrder = inOrder === undefined ? true : inOrder
-  var reading = false, abort
-  return function (read) {
-    var i = 0, j = 0, last = 0
-    var seen = [], started = false, ended = false, _cb, error
+},{"./core":45}],47:[function(require,module,exports){
+(function (Buffer){
+const ras = require('random-access-storage')
 
-    function drain () {
-      if(_cb) {
-        var cb = _cb
-        if(error) {
-          _cb = null
-          return cb(error)
-        }
-        if(Object.hasOwnProperty.call(seen, j)) {
-          _cb = null
-          var data = seen[j]; delete seen[j]; j++
-          cb(null, data)
-          if(width) start()
-        } else if(j >= last && ended) {
-          _cb = null
-          cb(ended)
-        }
-      }
+const TYPE = {type: 'octet/stream'}
+const requestFileSystem = window.requestFileSystem || window.webkitRequestFileSystem
+const persistentStorage = navigator.persistentStorage || navigator.webkitPersistentStorage
+const FileReader = window.FileReader
+const Blob = window.Blob
+
+createFile.DEFAULT_MAX_SIZE = Number.MAX_SAFE_INTEGER
+createFile.requestQuota = requestQuota
+
+module.exports = createFile
+
+function requestQuota (n, force, cb) {
+  if (typeof force === 'function') return requestQuota(n, true, force)
+  persistentStorage.queryUsageAndQuota(function (used, quota) {
+    if (quota && !force) return cb(null, quota)
+    persistentStorage.requestQuota(n, function (quota) {
+      cb(null, quota)
+    }, cb)
+  }, cb)
+}
+
+function createFile (name, opts) {
+  if (!opts) opts = {}
+
+  const maxSize = opts.maxSize || createFile.DEFAULT_MAX_SIZE
+  const mutex = new Mutex()
+
+  var fs = null
+  var file = null
+  var entry = null
+  var readers = []
+  var writers = []
+
+  return ras({read, write, open, stat, close, destroy})
+
+  function read (req) {
+    const r = readers.pop() || new ReadRequest(readers, file, entry, mutex)
+    r.run(req)
+  }
+
+  function write (req) {
+    const w = writers.pop() || new WriteRequest(writers, file, entry, mutex)
+    w.run(req)
+  }
+
+  function close (req) {
+    readers = writers = entry = file = fs = null
+    req.callback(null)
+  }
+
+  function stat (req) {
+    req.callback(null, file)
+  }
+
+  function destroy (req) {
+    entry.remove(ondone, onerror)
+
+    function ondone () {
+      req.callback(null, null)
     }
 
-    var start = looper(function () {
-      started = true
-      if(ended) return drain()
-      if(reading || width && (i - width >= j)) return
-      reading = true
-      read(abort, function (end, data) {
-        reading = false
-        if(end) {
-          last = i; ended = end
-          drain()
-        } else {
-          var k = i++
+    function onerror (err) {
+      req.callback(err, null)
+    }
+  }
 
-          map(data, function (err, data) {
-            if (inOrder) seen[k] = data
-            else seen.push(data)
-            if(err) error = err
-            drain()
-          })
-
-          if(!ended)
-            start()
-
-        }
-      })
+  function open (req) {
+    requestQuota(maxSize, true, function (err, granted) {
+      if (err) return onerror(err)
+      requestFileSystem(window.PERSISTENT, granted, function (res) {
+        fs = res
+        mkdirp(parentFolder(name), function () {
+          fs.root.getFile(name, {create: true}, function (e) {
+            entry = e
+            entry.file(function (f) {
+              file = f
+              console.log("OPENED", f)
+              req.callback(null)
+            }, onerror)
+          }, onerror)
+        })
+      }, onerror)
     })
 
-    return function (_abort, cb) {
-      if(_abort)
-        read(ended = abort = _abort, function (err) {
-          if(cb) return cb(err)
+    function mkdirp (name, ondone) {
+      if (!name) return ondone()
+      fs.root.getDirectory(name, {create: true}, ondone, function () {
+        mkdirp(parentFolder(name), function () {
+          fs.root.getDirectory(name, {create: true}, ondone, ondone)
         })
-      else {
-        _cb = cb
-        if(!started) start()
-        drain()
-      }
+      })
+    }
+
+    function onerror (err) {
+      fs = file = entry = null
+      req.callback(err)
     }
   }
 }
 
+function parentFolder (path) {
+  const i = path.lastIndexOf('/')
+  const j = path.lastIndexOf('\\')
+  const p = path.slice(0, Math.max(0, i, j))
+  return /^\w:$/.test(p) ? '' : p
+}
 
-},{"looper":11}],15:[function(require,module,exports){
-'use strict'
+function WriteRequest (pool, file, entry, mutex) {
+  this.writer = null
+  this.entry = entry
+  this.file = file
+  this.req = null
+  this.pool = pool
+  this.mutex = mutex
+  this.locked = false
+  this.truncating = false
+}
 
-var sources  = require('./sources')
-var sinks    = require('./sinks')
-var throughs = require('./throughs')
+WriteRequest.prototype.makeWriter = function () {
+  const self = this
+  this.entry.createWriter(function (writer) {
+    self.writer = writer
 
-exports = module.exports = require('./pull')
-
-exports.pull = exports
-
-for(var k in sources)
-  exports[k] = sources[k]
-
-for(var k in throughs)
-  exports[k] = throughs[k]
-
-for(var k in sinks)
-  exports[k] = sinks[k]
-
-
-},{"./pull":16,"./sinks":21,"./sources":28,"./throughs":37}],16:[function(require,module,exports){
-'use strict'
-
-module.exports = function pull (a) {
-  var length = arguments.length
-  if (typeof a === 'function' && a.length === 1) {
-    var args = new Array(length)
-    for(var i = 0; i < length; i++)
-      args[i] = arguments[i]
-    return function (read) {
-      if (args == null) {
-        throw new TypeError("partial sink should only be called once!")
-      }
-
-      // Grab the reference after the check, because it's always an array now
-      // (engines like that kind of consistency).
-      var ref = args
-      args = null
-
-      // Prioritize common case of small number of pulls.
-      switch (length) {
-      case 1: return pull(read, ref[0])
-      case 2: return pull(read, ref[0], ref[1])
-      case 3: return pull(read, ref[0], ref[1], ref[2])
-      case 4: return pull(read, ref[0], ref[1], ref[2], ref[3])
-      default:
-        ref.unshift(read)
-        return pull.apply(null, ref)
-      }
+    writer.onwriteend = function () {
+      self.onwrite(null)
     }
-  }
 
-  var read = a
-
-  if (read && typeof read.source === 'function') {
-    read = read.source
-  }
-
-  for (var i = 1; i < length; i++) {
-    var s = arguments[i]
-    if (typeof s === 'function') {
-      read = s(read)
-    } else if (s && typeof s === 'object') {
-      s.sink(read)
-      read = s.source
+    writer.onerror = function (err) {
+      self.onwrite(err)
     }
+
+    self.run(self.req)
+  })
+}
+
+WriteRequest.prototype.onwrite = function (err) {
+  const req = this.req
+  this.req = null
+
+  if (this.locked) {
+    this.locked = false
+    this.mutex.release()
   }
 
-  return read
-}
-
-},{}],17:[function(require,module,exports){
-'use strict'
-
-var reduce = require('./reduce')
-
-module.exports = function collect (cb) {
-  return reduce(function (arr, item) {
-    arr.push(item)
-    return arr
-  }, [], cb)
-}
-
-},{"./reduce":24}],18:[function(require,module,exports){
-'use strict'
-
-var reduce = require('./reduce')
-
-module.exports = function concat (cb) {
-  return reduce(function (a, b) {
-    return a + b
-  }, '', cb)
-}
-
-},{"./reduce":24}],19:[function(require,module,exports){
-'use strict'
-
-module.exports = function drain (op, done) {
-  var read, abort
-
-  function sink (_read) {
-    read = _read
-    if(abort) return sink.abort()
-    //this function is much simpler to write if you
-    //just use recursion, but by using a while loop
-    //we do not blow the stack if the stream happens to be sync.
-    ;(function next() {
-        var loop = true, cbed = false
-        while(loop) {
-          cbed = false
-          read(null, function (end, data) {
-            cbed = true
-            if(end = end || abort) {
-              loop = false
-              if(done) done(end === true ? null : end)
-              else if(end && end !== true)
-                throw end
-            }
-            else if(op && false === op(data) || abort) {
-              loop = false
-              read(abort || true, done || function () {})
-            }
-            else if(!loop){
-              next()
-            }
-          })
-          if(!cbed) {
-            loop = false
-            return
-          }
-        }
-      })()
+  if (this.truncating) {
+    this.truncating = false
+    if (!err) return this.run(req)
   }
 
-  sink.abort = function (err, cb) {
-    if('function' == typeof err)
-      cb = err, err = true
-    abort = err || true
-    if(read) return read(abort, cb || function () {})
-  }
-
-  return sink
+  this.pool.push(this)
+  req.callback(err, null)
 }
 
-},{}],20:[function(require,module,exports){
-'use strict'
+WriteRequest.prototype.truncate = function () {
+  this.truncating = true
+  this.writer.truncate(this.req.offset)
+}
 
-function id (e) { return e }
-var prop = require('../util/prop')
-var drain = require('./drain')
+WriteRequest.prototype.lock = function () {
+  if (this.locked) return true
+  this.locked = this.mutex.lock(this)
+  return this.locked
+}
 
-module.exports = function find (test, cb) {
-  var ended = false
-  if(!cb)
-    cb = test, test = id
-  else
-    test = prop(test) || id
+WriteRequest.prototype.run = function (req) {
+  this.req = req
+  if (!this.writer || this.writer.length !== this.file.size) return this.makeWriter()
 
-  return drain(function (data) {
-    if(test(data)) {
-      ended = true
-      cb(null, data)
+  const end = req.offset + req.size
+  if (end > this.file.size && !this.lock()) return
+
+  if (req.offset > this.writer.length) {
+    if (req.offset > this.file.size) return this.truncate()
+    return this.makeWriter()
+  }
+
+  this.writer.seek(req.offset)
+  this.writer.write(new Blob([req.data], TYPE))
+}
+
+function Mutex () {
+  this.queued = null
+}
+
+Mutex.prototype.release = function () {
+  const queued = this.queued
+  this.queued = null
+  for (var i = 0; i < queued.length; i++) {
+    queued[i].run(queued[i].req)
+  }
+}
+
+Mutex.prototype.lock = function (req) {
+  if (this.queued) {
+    this.queued.push(req)
     return false
-    }
-  }, function (err) {
-    if(ended) return //already called back
-    cb(err === true ? null : err, null)
-  })
-}
-
-
-
-
-
-},{"../util/prop":44,"./drain":19}],21:[function(require,module,exports){
-'use strict'
-
-module.exports = {
-  drain: require('./drain'),
-  onEnd: require('./on-end'),
-  log: require('./log'),
-  find: require('./find'),
-  reduce: require('./reduce'),
-  collect: require('./collect'),
-  concat: require('./concat')
-}
-
-
-},{"./collect":17,"./concat":18,"./drain":19,"./find":20,"./log":22,"./on-end":23,"./reduce":24}],22:[function(require,module,exports){
-'use strict'
-
-var drain = require('./drain')
-
-module.exports = function log (done) {
-  return drain(function (data) {
-    console.log(data)
-  }, done)
-}
-
-},{"./drain":19}],23:[function(require,module,exports){
-'use strict'
-
-var drain = require('./drain')
-
-module.exports = function onEnd (done) {
-  return drain(null, done)
-}
-
-},{"./drain":19}],24:[function(require,module,exports){
-'use strict'
-
-var drain = require('./drain')
-
-module.exports = function reduce (reducer, acc, cb ) {
-  if(!cb) cb = acc, acc = null
-  var sink = drain(function (data) {
-    acc = reducer(acc, data)
-  }, function (err) {
-    cb(err, acc)
-  })
-  if (arguments.length === 2)
-    return function (source) {
-      source(null, function (end, data) {
-        //if ended immediately, and no initial...
-        if(end) return cb(end === true ? null : end)
-        acc = data; sink(source)
-      })
-    }
-  else
-    return sink
-}
-
-},{"./drain":19}],25:[function(require,module,exports){
-'use strict'
-
-module.exports = function count (max) {
-  var i = 0; max = max || Infinity
-  return function (end, cb) {
-    if(end) return cb && cb(end)
-    if(i > max)
-      return cb(true)
-    cb(null, i++)
   }
-}
-
-
-
-},{}],26:[function(require,module,exports){
-'use strict'
-//a stream that ends immediately.
-module.exports = function empty () {
-  return function (abort, cb) {
-    cb(true)
-  }
-}
-
-},{}],27:[function(require,module,exports){
-'use strict'
-//a stream that errors immediately.
-module.exports = function error (err) {
-  return function (abort, cb) {
-    cb(err)
-  }
-}
-
-
-},{}],28:[function(require,module,exports){
-'use strict'
-module.exports = {
-  keys: require('./keys'),
-  once: require('./once'),
-  values: require('./values'),
-  count: require('./count'),
-  infinite: require('./infinite'),
-  empty: require('./empty'),
-  error: require('./error')
-}
-
-},{"./count":25,"./empty":26,"./error":27,"./infinite":29,"./keys":30,"./once":31,"./values":32}],29:[function(require,module,exports){
-'use strict'
-module.exports = function infinite (generate) {
-  generate = generate || Math.random
-  return function (end, cb) {
-    if(end) return cb && cb(end)
-    return cb(null, generate())
-  }
-}
-
-
-
-},{}],30:[function(require,module,exports){
-'use strict'
-var values = require('./values')
-module.exports = function (object) {
-  return values(Object.keys(object))
-}
-
-
-
-},{"./values":32}],31:[function(require,module,exports){
-'use strict'
-var abortCb = require('../util/abort-cb')
-
-module.exports = function once (value, onAbort) {
-  return function (abort, cb) {
-    if(abort)
-      return abortCb(cb, abort, onAbort)
-    if(value != null) {
-      var _value = value; value = null
-      cb(null, _value)
-    } else
-      cb(true)
-  }
-}
-
-
-
-},{"../util/abort-cb":43}],32:[function(require,module,exports){
-'use strict'
-var abortCb = require('../util/abort-cb')
-
-module.exports = function values (array, onAbort) {
-  if(!array)
-    return function (abort, cb) {
-      if(abort) return abortCb(cb, abort, onAbort)
-      return cb(true)
-    }
-  if(!Array.isArray(array))
-    array = Object.keys(array).map(function (k) {
-      return array[k]
-    })
-  var i = 0
-  return function (abort, cb) {
-    if(abort)
-      return abortCb(cb, abort, onAbort)
-    if(i >= array.length)
-      cb(true)
-    else
-      cb(null, array[i++])
-  }
-}
-
-},{"../util/abort-cb":43}],33:[function(require,module,exports){
-'use strict'
-
-function id (e) { return e }
-var prop = require('../util/prop')
-
-module.exports = function asyncMap (map) {
-  if(!map) return id
-  map = prop(map)
-  var busy = false, abortCb, aborted
-  return function (read) {
-    return function next (abort, cb) {
-      if(aborted) return cb(aborted)
-      if(abort) {
-        aborted = abort
-        if(!busy) read(abort, function (err) {
-          //incase the source has already ended normally,
-          //we should pass our own error.
-          cb(abort)
-        })
-        else read(abort, function (err) {
-          //if we are still busy, wait for the mapper to complete.
-          if(busy) abortCb = cb
-          else cb(abort)
-        })
-      }
-      else
-        read(null, function (end, data) {
-          if(end) cb(end)
-          else if(aborted) cb(aborted)
-          else {
-            busy = true
-            map(data, function (err, data) {
-              busy = false
-              if(aborted) {
-                cb(aborted)
-                abortCb && abortCb(aborted)
-              }
-              else if(err) next (err, cb)
-              else cb(null, data)
-            })
-          }
-        })
-    }
-  }
-}
-
-
-
-
-
-
-
-
-},{"../util/prop":44}],34:[function(require,module,exports){
-'use strict'
-
-var tester = require('../util/tester')
-var filter = require('./filter')
-
-module.exports = function filterNot (test) {
-  test = tester(test)
-  return filter(function (data) { return !test(data) })
-}
-
-},{"../util/tester":45,"./filter":35}],35:[function(require,module,exports){
-'use strict'
-
-var tester = require('../util/tester')
-
-module.exports = function filter (test) {
-  //regexp
-  test = tester(test)
-  return function (read) {
-    return function next (end, cb) {
-      var sync, loop = true
-      while(loop) {
-        loop = false
-        sync = true
-        read(end, function (end, data) {
-          if(!end && !test(data))
-            return sync ? loop = true : next(end, cb)
-          cb(end, data)
-        })
-        sync = false
-      }
-    }
-  }
-}
-
-
-},{"../util/tester":45}],36:[function(require,module,exports){
-'use strict'
-
-var values = require('../sources/values')
-var once = require('../sources/once')
-
-//convert a stream of arrays or streams into just a stream.
-module.exports = function flatten () {
-  return function (read) {
-    var _read
-    return function (abort, cb) {
-      if (abort) { //abort the current stream, and then stream of streams.
-        _read ? _read(abort, function(err) {
-          read(err || abort, cb)
-        }) : read(abort, cb)
-      }
-      else if(_read) nextChunk()
-      else nextStream()
-
-      function nextChunk () {
-        _read(null, function (err, data) {
-          if (err === true) nextStream()
-          else if (err) {
-            read(true, function(abortErr) {
-              // TODO: what do we do with the abortErr?
-              cb(err)
-            })
-          }
-          else cb(null, data)
-        })
-      }
-      function nextStream () {
-        _read = null
-        read(null, function (end, stream) {
-          if(end)
-            return cb(end)
-          if(Array.isArray(stream) || stream && 'object' === typeof stream)
-            stream = values(stream)
-          else if('function' != typeof stream)
-            stream = once(stream)
-          _read = stream
-          nextChunk()
-        })
-      }
-    }
-  }
-}
-
-
-},{"../sources/once":31,"../sources/values":32}],37:[function(require,module,exports){
-'use strict'
-
-module.exports = {
-  map: require('./map'),
-  asyncMap: require('./async-map'),
-  filter: require('./filter'),
-  filterNot: require('./filter-not'),
-  through: require('./through'),
-  take: require('./take'),
-  unique: require('./unique'),
-  nonUnique: require('./non-unique'),
-  flatten: require('./flatten')
-}
-
-
-
-
-},{"./async-map":33,"./filter":35,"./filter-not":34,"./flatten":36,"./map":38,"./non-unique":39,"./take":40,"./through":41,"./unique":42}],38:[function(require,module,exports){
-'use strict'
-
-function id (e) { return e }
-var prop = require('../util/prop')
-
-module.exports = function map (mapper) {
-  if(!mapper) return id
-  mapper = prop(mapper)
-  return function (read) {
-    return function (abort, cb) {
-      read(abort, function (end, data) {
-        try {
-        data = !end ? mapper(data) : null
-        } catch (err) {
-          return read(err, function () {
-            return cb(err)
-          })
-        }
-        cb(end, data)
-      })
-    }
-  }
-}
-
-},{"../util/prop":44}],39:[function(require,module,exports){
-'use strict'
-
-var unique = require('./unique')
-
-//passes an item through when you see it for the second time.
-module.exports = function nonUnique (field) {
-  return unique(field, true)
-}
-
-},{"./unique":42}],40:[function(require,module,exports){
-'use strict'
-
-//read a number of items and then stop.
-module.exports = function take (test, opts) {
-  opts = opts || {}
-  var last = opts.last || false // whether the first item for which !test(item) should still pass
-  var ended = false
-  if('number' === typeof test) {
-    last = true
-    var n = test; test = function () {
-      return --n
-    }
-  }
-
-  return function (read) {
-
-    function terminate (cb) {
-      read(true, function (err) {
-        last = false; cb(err || true)
-      })
-    }
-
-    return function (end, cb) {
-      if(ended && !end) last ? terminate(cb) : cb(ended)
-      else if(ended = end) read(ended, cb)
-      else
-        read(null, function (end, data) {
-          if(ended = ended || end) {
-            //last ? terminate(cb) :
-            cb(ended)
-          }
-          else if(!test(data)) {
-            ended = true
-            last ? cb(null, data) : terminate(cb)
-          }
-          else
-            cb(null, data)
-        })
-    }
-  }
-}
-
-},{}],41:[function(require,module,exports){
-'use strict'
-
-//a pass through stream that doesn't change the value.
-module.exports = function through (op, onEnd) {
-  var a = false
-
-  function once (abort) {
-    if(a || !onEnd) return
-    a = true
-    onEnd(abort === true ? null : abort)
-  }
-
-  return function (read) {
-    return function (end, cb) {
-      if(end) once(end)
-      return read(end, function (end, data) {
-        if(!end) op && op(data)
-        else once(end)
-        cb(end, data)
-      })
-    }
-  }
-}
-
-},{}],42:[function(require,module,exports){
-'use strict'
-
-function id (e) { return e }
-var prop = require('../util/prop')
-var filter = require('./filter')
-
-//drop items you have already seen.
-module.exports = function unique (field, invert) {
-  field = prop(field) || id
-  var seen = {}
-  return filter(function (data) {
-    var key = field(data)
-    if(seen[key]) return !!invert //false, by default
-    else seen[key] = true
-    return !invert //true by default
-  })
-}
-
-
-},{"../util/prop":44,"./filter":35}],43:[function(require,module,exports){
-module.exports = function abortCb(cb, abort, onAbort) {
-  cb(abort)
-  onAbort && onAbort(abort === true ? null: abort)
-  return
-}
-
-
-},{}],44:[function(require,module,exports){
-module.exports = function prop (key) {
-  return key && (
-    'string' == typeof key
-    ? function (data) { return data[key] }
-    : 'object' === typeof key && 'function' === typeof key.exec //regexp
-    ? function (data) { var v = key.exec(data); return v && v[0] }
-    : key
-  )
-}
-
-},{}],45:[function(require,module,exports){
-var prop = require('./prop')
-
-function id (e) { return e }
-
-module.exports = function tester (test) {
-  return (
-    'object' === typeof test && 'function' === typeof test.test //regexp
-    ? function (data) { return test.test(data) }
-    : prop (test) || id
-  )
-}
-
-},{"./prop":44}],46:[function(require,module,exports){
-(function (Buffer){
-exports.initialize = function (block, offset, buffer) {
-  return {
-    block: block,
-    start: offset - offset%block,
-    offset: offset || 0,
-    written: offset || 0,
-    writing: offset || 0,
-    buffers: [buffer]
-  }
-}
-
-exports.append = function (state, buffer) {
-  var last = state.buffers[state.buffers.length-1]
-  if(!last) throw new Error('no last buffer')
-  var start = state.offset%state.block
-  var _offset = state.offset
-  if(start + buffer.length + 4 > state.block - 6) {
-    last.writeUInt16LE(state.block-1, start)
-    last.writeUInt32LE(start, state.block-4)
-    state.offset = nextBlock(state.offset, state.block)
-    start = 0
-    state.buffers.push(last = Buffer.alloc(state.block))
-  }
-  last.writeUInt16LE(buffer.length, start)
-  buffer.copy(last, start+2)
-  last.writeUInt16LE(buffer.length, start+2+buffer.length)
-  state.offset += 4+buffer.length
-
-  if(state.offset <= _offset) throw new Error('offset must grow, was:'+_offset+', is now:'+state.offset)
-
-  return state
-}
-
-//to write data, get the next write block
-function startBlock (offset, block) {
-  return (offset - offset%block)
-}
-
-function nextBlock(offset, block) {
-  return startBlock(offset, block) + block
-}
-
-
-exports.writable = function (state) {
-  if(state.writing > state.written) throw new Error ('already writing')
-  //from written to the end of the block, or the offset
-  var max = Math.min(nextBlock(state.written, state.block), state.offset)
-  if(max <= state.written) throw new Error('null write')
-  state.writing = max
-  return state
-}
-
-exports.getWritable = function (state) {
-  return state.buffers[0].slice(state.written-state.start, state.writing - state.start)
-}
-
-exports.written = function (state) {
-  if(state.writing <= state.written) throw new Error('not currently writing')
-  state.written = state.writing
-  if(!(state.written % state.block)) {
-    state.start += state.block
-    state.buffers.shift()
-  }
-  return state
-}
-
-exports.hasWholeWrite = function (state) {
-  //if from written to offset finishes the block
-  return nextBlock(state.written, state.block) < state.offset
-}
-
-exports.hasWrite = function (state) {
-  return state.offset > state.written
-}
-
-exports.isWriting = function (state) {
-  return state.writing > state.written
-}
-
-
-}).call(this,require("buffer").Buffer)
-},{"buffer":2}],47:[function(require,module,exports){
-var toPull = require('push-stream-to-pull-stream/source')
-var Obv = require('obv')
-module.exports = function toCompat(log) {
-  log.since = Obv()
-  log.onWrite = log.since.set
-  log.onReady(function () {
-    console.log(log.length)
-    log.since.set(log.length-1)
-  })
-
-  var _stream = log.stream
-  log.stream = function (opts) {
-    var stream = _stream.call(log, opts)
-    return toPull(stream)
-  }
-  return log
-}
-
-
-},{"obv":52,"push-stream-to-pull-stream/source":54}],48:[function(require,module,exports){
-var result = {start: -1, length: -1, offset: -1}
-module.exports = {
-  encode: function (block, array, b) {
-    var c = 0
-    var offsets = []
-    for(var i = 0; i<array.length; i++) {
-      var length = array[i].length
-      //the buffer is full, pad end.
-      if(c+length+4 >= block-6) {
-        b.fill(0, c+2, block)
-        b.writeUInt32LE(c, block-4) //write pointer to last item
-        b.writeUInt16LE(block-1, c)
-        if(c >= block-6) throw new Error('block overlaps:'+c+', '+(block-6))
-        return offsets
-      }
-      else {
-        b.writeUInt16LE(length, c)
-        array[i].copy(b, c+2, 0, length)
-        b.writeUInt16LE(length, c+length+2)
-        offsets.push(c)
-        c+=length+4
-      }
-    }
-    return offsets
-  },
-
-
-  getBlockIndex: function (block, offset) {
-    return ~~(offset/block)
-  },
-  getBlockStart: function (block, offset) {
-    return offset % block
-  },
-
-  //getRecord(buffer, 0) for first record in block
-  getRecord: function (block, buffer, offset) {
-    var start = offset % block
-    var length = buffer.readUInt16LE(start)
-    if(length === block - 1)
-      return null
-    else {
-      var _length = buffer.readUInt16LE(start+2+length)
-      if(_length != length)
-        throw new Error('expected matching length at end, expected:'+length+', was:'+_length)
-      result.offset = offset
-      result.start = start+2
-      result.length = length
-      return result
-    }
-  },
-
-  getLastRecord: function (block, buffer, offset) {
-    var start = buffer.readUInt32LE(block - 4)
-    return module.exports.getPreviousRecord(block, buffer, offset-block + start)
-  },
-
-  getPreviousRecord: function (block, buffer, offset) {
-    var start = offset%block
-    if(start == 0) return
-    var length = buffer.readUInt16LE(start-2)
-    return offset - length - 4
-  }
-}
-
-
-
-
-
-},{}],49:[function(require,module,exports){
-(function (Buffer){
-module.exports = function (RAF, Cache) {
-var Stream = require('./stream')
-var Append = require('./append')
-
-var DO_CACHE = true
-
-function id(e) { return e }
-var _codec = {encode: id, decode: id, buffer: true}
-return function (file, opts) {
-  var cache = new Cache(1024)
-  var raf = RAF(file)
-  var block = opts && opts.block || 65536
-  var length = null, waiting = [], waitingDrain = [], self, state
-  var codec = opts && opts.codec || _codec
-
-  raf.stat(function (err, stat) {
-    var len = stat ? stat.size : 0
-    if(len%block == 0) {
-      self.length = length = len
-      self.appendState = state = Append.initialize(block, length, Buffer.alloc(block))
-      while(waiting.length) waiting.shift()()
-    } else {
-      var start = len - len%block
-      raf.read(len - len%block, Math.min(block, len%block), function (err, _buffer) {
-        if(err) throw err
-        var buffer = Buffer.alloc(block)
-        _buffer.copy(buffer)
-        self.length = length = len
-        self.appendState = state = Append.initialize(block, length, buffer)
-        while(waiting.length) waiting.shift()()
-      })
-    }
-  })
-
-  function onLoad (fn) {
-    return function (offset, cb) {
-      if(length === null) waiting.push(function () { fn(offset, cb) })
-      else return fn(offset, cb)
-    }
-  }
-
-  // the cache slows things down a surprising amount!
-  // an entire scan in 1.76 seconds, vs > 2.5 seconds.
-  var last_index = -1, last_buffer
-  var blocks = cache; //new WeakMap()
-
-  function getBlock (i,  cb) {
-    if(i === last_index)
-      return cb(null, last_buffer)
-    if(DO_CACHE && blocks.get(i))
-      return cb(null, blocks.get(i))
-
-    var file_start = i*block
-    //insert cache here...
-
-    if(file_start == state.start)
-      return cb(null, state.buffers[0])
-
-    raf.read(file_start, Math.min(block, length-file_start), function (err, buffer) {
-      if(err) return setTimeout(function () {
-        getBlock(i, cb)
-      }, 200)
-      if(DO_CACHE) blocks.set(i, buffer)
-      last_index = i; last_buffer = buffer;
-      cb(err, buffer)
-    })
-  }
-
-  function callback(cb, buffer, start, length, offset) {
-    cb(null,
-      //I did consider just returning the whole buffer + start + length,
-      //then let the reader treat that as pointers, but it didn't
-      //actually measure to be faster.
-      codec.decode(buffer.slice(start, start+length)),
-      start,
-      length,
-      offset
-    )
-  }
-
-  function get (offset, cb) {
-    //read the whole block
-    if(offset >= length) return cb()
-    var block_start = offset%block
-    var file_start = offset - block_start
-    getBlock(~~(offset/block), function (err, buffer) {
-      if(err) return cb(err)
-      var length = buffer.readUInt16LE(block_start)
-      //if this is last item in block, jump to start of next block.
-      if(length === block-1) //wouldn't zero be better?
-        get(file_start+block, cb)
-      else
-        callback(cb, buffer, block_start+2, length, offset)
-    })
-  }
-
-  var write_timer
-  var w = 0
-  function next_write () {
-    state = Append.writable(state)
-    var buffer = Append.getWritable(state)
-    raf.write(state.written, buffer, function (err, v) {
-      if(err) throw err
-      var w = state.written
-      state = Append.written(state)
-
-      return schedule_next_write()
-    })
-  }
-
-  function schedule_next_write () {
-    if(Append.isWriting(state)) return
-    if(Append.hasWholeWrite(state)) {
-      clearTimeout(write_timer)
-      next_write()
-    } else if(Append.hasWrite(state)) {
-      clearTimeout(write_timer)
-      write_timer = setTimeout(next_write, 20)
-    } else {
-      //TODO: some views could be eager, updating before the log is fully persisted
-      //      just don't write the view data until the log is confirmed.
-      if(self.streams.length) {
-        for(var i = 0; i < self.streams.length; i++)
-          if(!self.streams[i].ended)
-            self.streams[i].resume()
-      }
-      while(waitingDrain.length)
-        waitingDrain.shift()()
-    }
-  }
-
-  function _append(data) {
-    data = codec.encode(data)
-    if('string' == typeof data)
-      data = Buffer.from(data)
-    state = Append.append(state, data)
-
-  }
-
-  function append(data, cb) {
-    if(Array.isArray(data)) {
-      for(var i = 0; i < data.length; i++)
-        _append(data[i])
-    } else
-      _append(data)
-
-    self.length = length = state.offset
-    schedule_next_write()
-    self.onWrite(state.offset)
-    cb(null, state.offset)
-  }
-
-  return self = {
-    filename: file,
-    block: block,
-    length: null,
-    appendState: state,
-    codec: codec,
-    getBlock: onLoad(getBlock),
-    get: onLoad(get),
-
-    getPrevious: onLoad(function (offset, cb) {
-      var block_start = offset%block
-      var file_start = offset - block_start
-      if(block_start === 0) {
-        file_start = file_start - block //read the previous block!
-        getBlock(~~(offset/block)-1, function (err, buffer) {
-          block_start = buffer.readUInt32LE(block-4)
-          var length = buffer.readUInt16LE(block_start-2)
-          callback(cb, buffer, block_start-2-length, length, offset)
-        })
-      }
-      else {
-        getBlock(~~(offset/block), function (err, buffer) {
-          var length = buffer.readUInt16LE(block_start-2)
-          callback(cb, buffer, block_start-2-length, length, offset)
-        })
-      }
-    }),
-
-  /*
-    getNext: onLoad(function (offset, cb) {
-      var block_start = offset%block
-      var file_start = offset - block_start
-      getBlock(~~(offset/block), function (err, buffer) {
-        if(err) return cb(err)
-
-        var length = buffer.readUInt16LE(block_start)
-        if(length == block-1)
-          get(file_start + block, cb)
-        else
-          get(offset+length+4, cb)
-      })
-
-    }),
-  */
-    onReady: function (fn) {
-      if(this.length != null) return fn()
-      waiting.push(fn)
-    },
-
-    append: onLoad(append),
-
-    stream: function (opts) {
-      var stream = new Stream(this, opts)
-      if(opts && opts.live)
-        this.streams.push(stream)
-      return stream
-    },
-
-    streams: [],
-
-    onWrite: function () {},
-
-    onDrain: onLoad(function (fn) {
-      if(!Append.hasWrite(state)) fn()
-      else waitingDrain.push(fn)
-    })
-  }
-}
-}
-
-
-
-}).call(this,require("buffer").Buffer)
-},{"./append":46,"./stream":56,"buffer":2}],50:[function(require,module,exports){
-arguments[4][11][0].apply(exports,arguments)
-},{"dup":11}],51:[function(require,module,exports){
-(function (Buffer){
-
-exports.compare = function (a, b) {
-
-  if(Buffer.isBuffer(a)) {
-    var l = Math.min(a.length, b.length)
-    for(var i = 0; i < l; i++) {
-      var cmp = a[i] - b[i]
-      if(cmp) return cmp
-    }
-    return a.length - b.length
-  }
-
-  return a < b ? -1 : a > b ? 1 : 0
-}
-
-// to be compatible with the current abstract-leveldown tests
-// nullish or empty strings.
-// I could use !!val but I want to permit numbers and booleans,
-// if possible.
-
-function isDef (val) {
-  return val !== undefined && val !== ''
-}
-
-function has (range, name) {
-  return Object.hasOwnProperty.call(range, name)
-}
-
-function hasKey(range, name) {
-  return Object.hasOwnProperty.call(range, name) && name
-}
-
-var lowerBoundKey = exports.lowerBoundKey = function (range) {
-    return (
-       hasKey(range, 'gt')
-    || hasKey(range, 'gte')
-    || hasKey(range, 'min')
-    || (range.reverse ? hasKey(range, 'end') : hasKey(range, 'start'))
-    || undefined
-    )
-}
-
-var lowerBound = exports.lowerBound = function (range, def) {
-  var k = lowerBoundKey(range)
-  return k ? range[k] : def
-}
-
-var lowerBoundInclusive = exports.lowerBoundInclusive = function (range) {
-  return has(range, 'gt') ? false : true
-}
-
-var upperBoundInclusive = exports.upperBoundInclusive =
-  function (range) {
-    return (has(range, 'lt') /*&& !range.maxEx*/) ? false : true
-  }
-
-var lowerBoundExclusive = exports.lowerBoundExclusive =
-  function (range) {
-    return !lowerBoundInclusive(range)
-  }
-
-var upperBoundExclusive = exports.upperBoundExclusive =
-  function (range) {
-    return !upperBoundInclusive(range)
-  }
-
-var upperBoundKey = exports.upperBoundKey = function (range) {
-    return (
-       hasKey(range, 'lt')
-    || hasKey(range, 'lte')
-    || hasKey(range, 'max')
-    || (range.reverse ? hasKey(range, 'start') : hasKey(range, 'end'))
-    || undefined
-    )
-}
-
-var upperBound = exports.upperBound = function (range, def) {
-  var k = upperBoundKey(range)
-  return k ? range[k] : def
-}
-
-exports.start = function (range, def) {
-  return range.reverse ? upperBound(range, def) : lowerBound(range, def)
-}
-exports.end = function (range, def) {
-  return range.reverse ? lowerBound(range, def) : upperBound(range, def)
-}
-exports.startInclusive = function (range) {
-  return (
-    range.reverse
-  ? upperBoundInclusive(range)
-  : lowerBoundInclusive(range)
-  )
-}
-exports.endInclusive = function (range) {
-  return (
-    range.reverse
-  ? lowerBoundInclusive(range)
-  : upperBoundInclusive(range)
-  )
-}
-
-function id (e) { return e }
-
-exports.toLtgt = function (range, _range, map, lower, upper) {
-  _range = _range || {}
-  map = map || id
-  var defaults = arguments.length > 3
-  var lb = exports.lowerBoundKey(range)
-  var ub = exports.upperBoundKey(range)
-  if(lb) {
-    if(lb === 'gt') _range.gt = map(range.gt, false)
-    else            _range.gte = map(range[lb], false)
-  }
-  else if(defaults)
-    _range.gte = map(lower, false)
-
-  if(ub) {
-    if(ub === 'lt') _range.lt = map(range.lt, true)
-    else            _range.lte = map(range[ub], true)
-  }
-  else if(defaults)
-    _range.lte = map(upper, true)
-
-  if(range.reverse != null)
-    _range.reverse = !!range.reverse
-
-  //if range was used mutably
-  //(in level-sublevel it's part of an options object
-  //that has more properties on it.)
-  if(has(_range, 'max'))   delete _range.max
-  if(has(_range, 'min'))   delete _range.min
-  if(has(_range, 'start')) delete _range.start
-  if(has(_range, 'end'))   delete _range.end
-
-  return _range
-}
-
-exports.contains = function (range, key, compare) {
-  compare = compare || exports.compare
-
-  var lb = lowerBound(range)
-  if(isDef(lb)) {
-    var cmp = compare(key, lb)
-    if(cmp < 0 || (cmp === 0 && lowerBoundExclusive(range)))
-      return false
-  }
-
-  var ub = upperBound(range)
-  if(isDef(ub)) {
-    var cmp = compare(key, ub)
-    if(cmp > 0 || (cmp === 0) && upperBoundExclusive(range))
-      return false
-  }
-
+  this.queued = []
   return true
 }
 
-exports.filter = function (range, compare) {
-  return function (key) {
-    return exports.contains(range, key, compare)
+function ReadRequest (pool, file, entry, mutex) {
+  this.reader = new FileReader()
+  this.file = file
+  this.req = null
+  this.pool = pool
+  this.retry = true
+  this.mutex = mutex
+  this.locked = false
+
+  const self = this
+
+  this.reader.onerror = function () {
+    self.onread(this.error, null)
+  }
+
+  this.reader.onload = function () {
+    const buf = Buffer.from(this.result)
+    self.onread(null, buf)
   }
 }
 
-
-
-}).call(this,{"isBuffer":require("../../../../.nvm/versions/node/v8.11.4/lib/node_modules/browserify/node_modules/is-buffer/index.js")})
-},{"../../../../.nvm/versions/node/v8.11.4/lib/node_modules/browserify/node_modules/is-buffer/index.js":5}],52:[function(require,module,exports){
-
-module.exports = function (filter) {
-  var value = null, listeners = [], oncers = []
-  function trigger (_value) {
-    value = _value
-    var length = listeners.length
-    for(var i = 0; i< length && value === _value; i++) {
-      var listener = listeners[i](value)
-      //if we remove a listener, must decrement i also
-    }
-    // decrement from length, incase a !immediately
-    // listener is added during a trigger
-    var l = oncers.length
-    var _oncers = oncers
-    oncers = []
-    while(l-- && _value === value) {
-      _oncers.shift()(value)
-    }
-  }
-
-  function many (ready, immediately) {
-    var i = listeners.push(ready) - 1
-    if(value !== null && immediately !== false) ready(value)
-    return function () { //manually remove...
-      //fast path, will happen if an earlier listener has not been removed.
-      if(listeners[i] !== ready)
-        i = listeners.indexOf(ready)
-      listeners.splice(i, 1)
-    }
-  }
-
-  many.set = function (_value) {
-    if(filter ? filter(value, _value) : true) trigger(many.value = _value)
-    return many
-  }
-
-  many.once = function (once, immediately) {
-    if(value !== null && immediately !== false) {
-      once(value)
-      return function () {}
-    }
-    else {
-      var i = oncers.push(once) - 1
-      return function () {
-        if(oncers[i] !== once)
-          i = oncers.indexOf(once)
-      }
-    }
-  }
-
-  return many
+ReadRequest.prototype.lock = function () {
+  if (this.locked) return true
+  this.locked = this.mutex.lock(this)
+  return this.locked
 }
 
+ReadRequest.prototype.onread = function (err, buf) {
+  const req = this.req
 
-
-},{}],53:[function(require,module,exports){
-var looper = require('looper')
-
-module.exports = function (read) {
-  var _abort, _cb
-  var loop = looper(function () {
-    read(_abort, _cb)
-  })
-  return function (abort, cb) {
-    _abort = abort
-    _cb = cb
-    loop()
+  if (err && this.retry) {
+    this.retry = false
+    if (this.lock(this)) this.run(req)
+    return
   }
+
+  this.req = null
+  this.pool.push(this)
+  this.retry = true
+
+  if (this.locked) {
+    this.locked = false
+    this.mutex.release()
+  }
+
+  req.callback(err, buf)
 }
 
-},{"looper":50}],54:[function(require,module,exports){
-'use strict'
-var looper = require('pull-looper')
-module.exports = function (push, length, done) {
-  var abort_cb, ended, buffer = [], _cb
-  length = length || 0
-
-  var adapter = {
-    paused: false,
-    write: function (data) {
-      if(_cb) {
-        var cb = _cb; _cb = null; cb(null, data)
-      }
-      else {
-        buffer.push(data)
-        if(buffer.length > length) {
-          adapter.paused = true
-        }
-      }
-    },
-    end: function (err) {
-      ended = err || true
-      if(_cb && (err || !buffer.length)) {
-        var cb = _cb; _cb = null; cb(ended)
-        if(done) {
-          var _done = done; done = null; _done(err)
-        }
-      }
-    },
-    source: null
-  }
-
-  push.pipe(adapter)
-
-  return looper(function (abort, cb) {
-    if(_cb && !abort) {
-      throw new Error('source:read twice')
-    }
-
-    if(abort) {
-      push.abort(abort)
-//      abort_cb = cb
-      cb(abort)
-    }
-    // if it ended with an error, cb immedately, dropping the buffer
-    else if(ended && ended !== true) {
-      cb(ended)
-      if(done) {
-        var _done = done; done = null; _done(ended)
-      }
-    }
-    // else read the buffer
-    else if(buffer.length) {
-      var data = buffer.shift()
-      cb(null, data)
-      if(buffer.length <= length/2 && adapter.paused) {
-        adapter.paused = false
-        push.resume()
-      }
-    }
-    else if(ended === true) {
-      cb(true)
-      if(done) {
-        var _done = done; done = null; _done()
-      }
-    }
-    else _cb = cb
-  })
+ReadRequest.prototype.run = function (req) {
+  const end = req.offset + req.size
+  this.req = req
+  if (end > this.file.size) return this.onread(new Error('Could not satisfy length'), null)
+  this.reader.readAsArrayBuffer(this.file.slice(req.offset, end))
 }
-
-
-},{"pull-looper":53}],55:[function(require,module,exports){
-
-/*
-A push stream pipeline is a doublely linked list.
-data (write/end) travels one way, and signals (pause/resume/abort) travels the other way.
-
-when you pipe to a stream, if it already has a source, find the first
-source and pipe to that. this makes a.pipe(b.pipe(c) work, or a.pipe(b)
-
-also, duplex streams (which, like in pull streams, are a pair {source, sink} streams)
-
-*/
-
-module.exports = function pipe (sink) {
-  var _sink = sink
-  while(sink.source) sink = sink.source
-  this.sink = sink
-  sink.source = this
-  if(!sink.paused) this.resume()
-  return _sink
-}
-
-
-
-},{}],56:[function(require,module,exports){
-var ltgt = require('ltgt')
-var frame = require('./frame')
-module.exports = Stream
-
-function Stream (blocks, opts) {
-  opts = opts || {}
-  this.reverse = !!opts.reverse
-  this.live = !!opts.live
-  this.blocks = blocks
-  this.cursor = -1 //this.start = this.end = -1
-  this.seqs = opts.seqs !== false
-  this.values = opts.values !== false
-  this.limit = opts.limit || 0
-  this.count = 0
-
-  this.min = this.max = this.min_inclusive = this.max_inclusive = null
-
-  var self = this
-  this.opts = opts
-  this.blocks.onReady(this._ready.bind(this))
-}
-
-Stream.prototype._ready = function () {
-  this.min = ltgt.lowerBound(this.opts, null)
-  if(ltgt.lowerBoundInclusive(this.opts))
-    this.min_inclusive = this.min
-
-  this.max = ltgt.upperBound(this.opts, null)
-  if(ltgt.upperBoundInclusive(this.opts))
-    this.max_inclusive = this.max
-
-  //note: cursor has default of the current length or zero.
-  if(this.reverse)
-    this.cursor = ltgt.upperBound(this.opts, this.blocks.length)
-  else
-    this.cursor = ltgt.lowerBound(this.opts, 0)
-
-  if(this.cursor < 0) this.cursor = 0
-
-  var self = this
-  this.blocks.getBlock(~~(this.cursor/self.blocks.block), function (err, buffer) {
-    self._buffer = buffer
-    //reversing cursor starts at length, which won't be a thing.
-    self.resume()
-  })
-}
-
-Stream.prototype._next = function () {
-  if(!this._buffer || this.cursor === -1 || this.isAtEnd()) return
-  var block = this.blocks.block
-  var next_block
-  if(!this.reverse) {
-    var result = frame.getRecord(block, this._buffer, this.cursor)
-    if(result) {
-      this.cursor += result.length + 4
-      return result
-    } else {
-      //move to start of next block
-      this.cursor = (this.cursor - this.cursor%block)+block
-      if(this.cursor < this.blocks.length) {
-        //sometimes this is sync, which means we can actually return instead of cb
-        //if we always cb, we can get two resume loops going, which is weird.
-        next_block = ~~(this.cursor/block)
-      }
-      else
-        return
-    }
-  }
-  else {
-    if(this.cursor % block) {
-      //get the previous record, unless this is the first item
-      //in a lte stream.
-      if(!(this.count === 0 && this.max_inclusive === this.cursor)) {
-        this.cursor = frame.getPreviousRecord(block, this._buffer, this.cursor)
-      }
-      var result = frame.getRecord(block, this._buffer, this.cursor)
-      return result
-    }
-    else {
-      var current_block = ~~(this.cursor/block)
-      next_block = ~~(this.cursor/block)-1
-      if(current_block === next_block)
-        throw new Error('failed to decrement block')
-    }
-  }
-  var self = this, async = false, returned = false
-  if(next_block >= 0)
-    this.blocks.getBlock(next_block, function (err, buffer) {
-      //if(err) return self.abort(err)
-      self._buffer = buffer
-      returned = true
-      if(self.reverse) {
-        //point to the end of the blocks, in the newly retrived block
-        self.cursor = next_block*block + buffer.readUInt32LE(block - 4)
-      }
-      if(async) self.resume()
-    })
-  async = true
-  if(returned) return self._next()
-}
-
-Stream.prototype.isAtEnd = function () {
-  return this.reverse ? this.cursor <= 0 : this.cursor >= this.blocks.length
-}
-
-
-Stream.prototype._format = function (result) {
-  if(this.values) {
-    var value = this.blocks.codec.decode(this._buffer.slice(result.start, result.start + result.length))
-    if(this.seqs) this.sink.write({seq: result.offset, value: value})
-    else this.sink.write(value)
-  }
-  else
-    this.sink.write(result.offset)
-}
-
-Stream.prototype.resume = function () {
-  if(this.ended) return
-  while(this.sink && !this.sink.paused && !this.ended) {
-    var result = this._next()
-    if(result && result.length) {
-      var o = result.offset
-      this.count++
-      if(
-        (this.min === null || this.min < o || this.min_inclusive === o) &&
-        (this.max === null || this.max > o || this.max_inclusive === o)
-      ) {
-        this._format(result)
-      }
-      else {
-        if(this.limit > 0 && this.count >= this.limit) {
-          this.abort(); this.sink.end()
-        }
-      }
-    }
-    else if(!this.live && (result ? result.length == 0 : this.isAtEnd())) {
-      if(this.ended) throw new Error('already ended')
-      this.abort()
-      return
-    }
-    else
-      return
-
-  }
-}
-
-Stream.prototype.abort = function (err) {
-  //only thing to do is unsubscribe from live stream.
-  //but append isn't implemented yet...
-  this.ended = err || true
-  this.blocks.streams.splice(this.blocks.streams.indexOf(this), 1)
-  if(!this.sink.ended)
-    this.sink.end(err === true ? null : err)
-}
-
-Stream.prototype.pipe = require('push-stream/pipe')
-
-
-
-
-
-
-
-},{"./frame":48,"ltgt":51,"push-stream/pipe":55}],57:[function(require,module,exports){
-"use strict";
-
-Object.defineProperty(exports, "__esModule", {
-  value: true
-});
-const indexedDB = exports.indexedDB = window.indexedDB;
-
-},{}],58:[function(require,module,exports){
-(function (Buffer){
-"use strict";
-
-Object.defineProperty(exports, "__esModule", {
-  value: true
-});
-
-var _randomAccessStorage = require("random-access-storage");
-
-var _randomAccessStorage2 = _interopRequireDefault(_randomAccessStorage);
-
-var _IndexedDB = require("./IndexedDB");
-
-var _buffer = require("buffer");
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-const promise = (request) => new Promise((resolve, reject) => {
-  request.onsuccess = () => resolve(request.result);
-  request.onerror = () => reject(request.error);
-});
-
-function toCb(request, cb) {
-  request.onsuccess = function () {
-    cb(null, request.result)
-  }
-  request.onerror = function () {
-    cb(request.error)
-  }
-}
-
-class RandomAccessIDBFileVolume {
-  constructor(db, name, version, storeName, options) {
-    this.db = db;
-    this.name = name;
-    this.version = version;
-    this.storeName = storeName;
-    this.options = options;
-  }
-  store() {
-    const { db, storeName } = this;
-    const transaction = db.transaction([storeName], "readwrite");
-    return transaction.objectStore(storeName);
-  }
-  async delete(url) {
-    return await promise(this.store().delete(url));
-  }
-  async save(url, file) {
-    return await promise(this.store().put(file, url));
-  }
-  async open(url, mode) {
-    const file = await promise(this.store().get(url));
-    if (file) {
-      return file;
-    } else if (mode === "readwrite") {
-      const file = await promise(this.db.createMutableFile(url, "binary/random"));
-      await this.save(url, file);
-      return file;
-    } else {
-      throw new RangeError(`File ${url} does not exist`);
-    }
-  }
-
-  mount(file, options) {
-    return new RandomAccessProvider(this, `/${file}`, options);
-  }
-}
-
-class RandomAccessProvider extends _randomAccessStorage2.default {
-
-  static async mount(options = {}) {
-    if (!self.IDBMutableFile) {
-      throw Error(`Runtime does not supports IDBMutableFile https://developer.mozilla.org/en-US/docs/Web/API/IDBMutableFile`);
-    } else {
-      const name = options.name || `RandomAccess`;
-      const version = options.version || 1.0;
-      const storeName = options.storeName || `IDBMutableFile`;
-
-      const request = _IndexedDB.indexedDB.open(name, version);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(storeName)) {
-          db.createObjectStore(storeName);
-        }
-      };
-      const db = await promise(request);
-      const volume = new RandomAccessIDBFileVolume(db, name, version, storeName, options);
-      return (path, options) => volume.mount(path, options);
-    }
-  }
-  static async open(self, request) {
-    const { options } = self;
-    const mode = request.preferReadonly ? "readonly" : "readwrite";
-    self.debug && console.log(`>> open ${self.url} ${mode}`);
-
-    if (!self.file || self.mode !== mode && mode === "readwrite") {
-      self.mode = mode;
-      self.file = await self.volume.open(self.url, mode);
-    }
-
-    if (!(mode === "readonly" || !options.truncate)) {
-      const file = self.activate();
-      await promise(file.truncate(options.size || 0));
-    }
-
-    self.debug && console.log(`<< open ${self.url} ${mode}`);
-  }
-  static async read(self, request) {
-    if (request.size === 0) {
-      return cb(null, _buffer.Buffer.allocUnsafe(0))
-    }
-
-    const file = self.activate();
-    file.location = request.offset;
-    toCb(file.readAsArrayBuffer(request.size), function (err, chunk) {
-      if(err) request.callback(err)
-      else {
-        if (chunk.byteLength !== request.size) {
-          request.callback(new Error("Could not satisfy length"))
-        }
-        else {
-          request.callback(null, Buffer.from(chunk))
-        }
-      }
-    })
-  }
-  static async write(self, { data, offset, size }) {
-    self.debug && console.log(`>> write ${self.url} <${offset}, ${size}>`, data);
-    const { byteLength, byteOffset } = data;
-    const chunk = byteLength === size ? data : data.slice(0, size);
-
-    const file = self.activate();
-    file.location = offset;
-    const wrote = await promise(file.write(chunk));
-
-    self.debug && console.log(`<< write ${self.url} <${offset}, ${size}>`);
-
-    return wrote;
-  }
-  static async delete(self, { offset, size }) {
-    self.debug && console.log(`>> delete ${self.url} <${offset}, ${size}>`);
-    const stat = await this.stat(self);
-    if (offset + size >= stat.size) {
-      const file = self.activate();
-      await promise(file.truncate(offset));
-    }
-
-    self.debug && console.log(`<< delete ${self.url} <${offset}, ${size}>`);
-  }
-  static async stat(self) {
-    self.debug && console.log(`>> stat ${self.url}`);
-    const file = self.activate();
-    const stat = await promise(file.getMetadata());
-    self.debug && console.log(`<< stat {size:${stat.size}} ${self.url} `);
-
-    return stat;
-  }
-  static async close(self) {
-    self.debug && console.log(`>> close ${self.url}`);
-    const { lockedFile } = self;
-    if (lockedFile && lockedFile.active) {
-      await promise(lockedFile.flush());
-    }
-    self.lockedFile = null;
-    self.file = null;
-    self.debug && console.log(`<< close ${self.url}`);
-  }
-  static async destroy(self) {
-    self.debug && console.log(`>> destroy ${self.url}`);
-    await self.volume.delete(self.url);
-    self.debug && console.log(`<< destroy ${self.url}`);
-  }
-
-  static async awake(self) {
-    const { workQueue } = self;
-    self.isIdle = false;
-    let index = 0;
-    while (index < workQueue.length) {
-      const request = workQueue[index++];
-      await this.perform(self, request);
-    }
-    workQueue.length = 0;
-    self.isIdle = true;
-  }
-  static schedule(self, request) {
-    self.workQueue.push(request);
-    if (self.isIdle) {
-      this.awake(self);
-    }
-  }
-  static async perform(self, request) {
-//    try {
-      switch (request.type) {
-        case RequestType.open:
-          {
-            return request.callback(null, (await this.open(self, request)));
-          }
-        case RequestType.read:
-          {
-            this.read(self, request)
-//            return request.callback(null, (await this.read(self, request)));
-          }
-        case RequestType.write:
-          {
-            return request.callback(null, (await this.write(self, request)));
-          }
-        case RequestType.delete:
-          {
-            return request.callback(null, (await this.delete(self, request)));
-          }
-        case RequestType.stat:
-          {
-            return request.callback(null, (await this.stat(self)));
-          }
-        case RequestType.close:
-          {
-            return request.callback(null, (await this.close(self)));
-          }
-        case RequestType.destroy:
-          {
-            return request.callback(null, (await this.destroy(self)));
-          }
-      }
-//    } catch (error) {
-//      request.callback(error);
-//    }
-  }
-  _open(request) {
-    RandomAccessProvider.schedule(this, request);
-  }
-  _openReadonly(request) {
-    RandomAccessProvider.schedule(this, request);
-  }
-  _write(request) {
-    RandomAccessProvider.schedule(this, request);
-  }
-  _read(request) {
-    RandomAccessProvider.read(this, request);
-  }
-  _del(request) {
-    RandomAccessProvider.schedule(this, request);
-  }
-  _stat(request) {
-    RandomAccessProvider.perform(this, request);
-  }
-  _close(request) {
-    RandomAccessProvider.schedule(this, request);
-  }
-  _destroy(request) {
-    RandomAccessProvider.schedule(this, request);
-  }
-  constructor(volume, url, options = {}) {
-    super();
-    this.volume = volume;
-    this.url = url;
-    this.options = options;
-    this.mode = "readonly";
-    this.file = null;
-    this.lockedFile = null;
-
-    this.workQueue = [];
-    this.isIdle = true;
-    this.debug = !!volume.options.debug;
-  }
-  activate() {
-    const { lockedFile, file, mode } = this;
-    if (lockedFile && lockedFile.active) {
-      return lockedFile;
-    } else if (file) {
-      const lockedFile = file.open(mode);
-      this.lockedFile = lockedFile;
-      return lockedFile;
-    } else {
-      throw new RangeError(`Unable to activate file, likely provider was destroyed`);
-    }
-  }
-}
-
-const RequestType = {
-  open: 0,
-  read: 1,
-  write: 2,
-  delete: 3,
-  stat: 4,
-  close: 5,
-  destroy: 6
-};
-
-exports.default = RandomAccessProvider;
-module.exports = exports["default"];
-
-
-
-
-
-
-
-
-
-
-
 
 }).call(this,require("buffer").Buffer)
-},{"./IndexedDB":57,"buffer":2,"random-access-storage":60}],59:[function(require,module,exports){
-if (typeof Object.create === 'function') {
-  // implementation from standard node.js 'util' module
-  module.exports = function inherits(ctor, superCtor) {
-    ctor.super_ = superCtor
-    ctor.prototype = Object.create(superCtor.prototype, {
-      constructor: {
-        value: ctor,
-        enumerable: false,
-        writable: true,
-        configurable: true
-      }
-    });
-  };
-} else {
-  // old school shim for old browsers
-  module.exports = function inherits(ctor, superCtor) {
-    ctor.super_ = superCtor
-    var TempCtor = function () {}
-    TempCtor.prototype = superCtor.prototype
-    ctor.prototype = new TempCtor()
-    ctor.prototype.constructor = ctor
-  }
-}
-
-},{}],60:[function(require,module,exports){
+},{"buffer":2,"random-access-storage":48}],48:[function(require,module,exports){
 (function (process){
 var events = require('events')
 var inherits = require('inherits')
@@ -5554,4 +4611,908 @@ function nextTickCallback (req, err, val) {
 }
 
 }).call(this,require('_process'))
-},{"_process":6,"events":3,"inherits":59}]},{},[7]);
+},{"_process":6,"events":3,"inherits":43}],49:[function(require,module,exports){
+(function (Buffer){
+exports.initialize = function (block, offset, buffer) {
+  return {
+    block: block,
+    start: offset - offset%block,
+    offset: offset || 0,
+    written: offset || 0,
+    writing: offset || 0,
+    buffers: [buffer]
+  }
+}
+
+exports.append = function (state, buffer) {
+  var last = state.buffers[state.buffers.length-1]
+  if(!last) throw new Error('no last buffer')
+  var start = state.offset%state.block
+  var _offset = state.offset
+  if(start + buffer.length + 4 > state.block - 6) {
+    last.writeUInt16LE(state.block-1, start)
+    last.writeUInt32LE(start, state.block-4)
+    state.offset = nextBlock(state.offset, state.block)
+    start = 0
+    state.buffers.push(last = Buffer.alloc(state.block))
+  }
+  last.writeUInt16LE(buffer.length, start)
+  buffer.copy(last, start+2)
+  last.writeUInt16LE(buffer.length, start+2+buffer.length)
+  state.offset += 4+buffer.length
+
+  if(state.offset <= _offset) throw new Error('offset must grow, was:'+_offset+', is now:'+state.offset)
+
+  return state
+}
+
+//to write data, get the next write block
+function startBlock (offset, block) {
+  return (offset - offset%block)
+}
+
+function nextBlock(offset, block) {
+  return startBlock(offset, block) + block
+}
+
+
+exports.writable = function (state) {
+  if(state.writing > state.written) throw new Error ('already writing')
+  //from written to the end of the block, or the offset
+  var max = Math.min(nextBlock(state.written, state.block), state.offset)
+  if(max <= state.written) throw new Error('null write')
+  state.writing = max
+  return state
+}
+
+exports.getWritable = function (state) {
+  return state.buffers[0].slice(state.written-state.start, state.writing - state.start)
+}
+
+exports.written = function (state) {
+  if(state.writing <= state.written) throw new Error('not currently writing')
+  state.written = state.writing
+  if(!(state.written % state.block)) {
+    state.start += state.block
+    state.buffers.shift()
+  }
+  return state
+}
+
+exports.hasWholeWrite = function (state) {
+  //if from written to offset finishes the block
+  return nextBlock(state.written, state.block) < state.offset
+}
+
+exports.hasWrite = function (state) {
+  return state.offset > state.written
+}
+
+exports.isWriting = function (state) {
+  return state.writing > state.written
+}
+
+
+}).call(this,require("buffer").Buffer)
+},{"buffer":2}],50:[function(require,module,exports){
+var toPull = require('push-stream-to-pull-stream/source')
+var Obv = require('obv')
+module.exports = function toCompat(log) {
+  log.since = Obv()
+  log.onWrite = log.since.set
+  log.onReady(function () {
+    console.log(log.length)
+    log.since.set(log.length-1)
+  })
+
+  var _stream = log.stream
+  log.stream = function (opts) {
+    var stream = _stream.call(log, opts)
+    return toPull(stream)
+  }
+  return log
+}
+
+
+},{"obv":55,"push-stream-to-pull-stream/source":57}],51:[function(require,module,exports){
+var result = {start: -1, length: -1, offset: -1}
+module.exports = {
+  encode: function (block, array, b) {
+    var c = 0
+    var offsets = []
+    for(var i = 0; i<array.length; i++) {
+      var length = array[i].length
+      //the buffer is full, pad end.
+      if(c+length+4 >= block-6) {
+        b.fill(0, c+2, block)
+        b.writeUInt32LE(c, block-4) //write pointer to last item
+        b.writeUInt16LE(block-1, c)
+        if(c >= block-6) throw new Error('block overlaps:'+c+', '+(block-6))
+        return offsets
+      }
+      else {
+        b.writeUInt16LE(length, c)
+        array[i].copy(b, c+2, 0, length)
+        b.writeUInt16LE(length, c+length+2)
+        offsets.push(c)
+        c+=length+4
+      }
+    }
+    return offsets
+  },
+
+
+  getBlockIndex: function (block, offset) {
+    return ~~(offset/block)
+  },
+  getBlockStart: function (block, offset) {
+    return offset % block
+  },
+
+  //getRecord(buffer, 0) for first record in block
+  getRecord: function (block, buffer, offset) {
+    var start = offset % block
+    var length = buffer.readUInt16LE(start)
+    if(length === block - 1)
+      return null
+    else {
+      var _length = buffer.readUInt16LE(start+2+length)
+      if(_length != length)
+        throw new Error('expected matching length at end, expected:'+length+', was:'+_length)
+      result.offset = offset
+      result.start = start+2
+      result.length = length
+      return result
+    }
+  },
+
+  getLastRecord: function (block, buffer, offset) {
+    var start = buffer.readUInt32LE(block - 4)
+    return module.exports.getPreviousRecord(block, buffer, offset-block + start)
+  },
+
+  getPreviousRecord: function (block, buffer, offset) {
+    var start = offset%block
+    if(start == 0) return
+    var length = buffer.readUInt16LE(start-2)
+    return offset - length - 4
+  }
+}
+
+
+
+
+
+},{}],52:[function(require,module,exports){
+(function (Buffer){
+module.exports = function (RAF, Cache) {
+var Stream = require('./stream')
+var Append = require('./append')
+
+var DO_CACHE = true
+
+function id(e) { return e }
+var _codec = {encode: id, decode: id, buffer: true}
+return function (file, opts) {
+  var cache = new Cache(1024)
+  var raf = RAF(file)
+  var block = opts && opts.block || 65536
+  var length = null, waiting = [], waitingDrain = [], self, state
+  var codec = opts && opts.codec || _codec
+
+  raf.open(function (err) {
+    if(err) throw err
+    console.log('opened', file)
+    raf.stat(function (err, stat) {
+      var len = stat ? stat.size : 0
+      if(len%block == 0) {
+        self.length = length = len
+        self.appendState = state = Append.initialize(block, length, Buffer.alloc(block))
+        while(waiting.length) waiting.shift()()
+      } else {
+        var start = len - len%block
+        raf.read(len - len%block, Math.min(block, len%block), function (err, _buffer) {
+          if(err) throw err
+          var buffer = Buffer.alloc(block)
+          _buffer.copy(buffer)
+          self.length = length = len
+          self.appendState = state = Append.initialize(block, length, buffer)
+          while(waiting.length) waiting.shift()()
+        })
+      }
+    })
+  })
+
+  function onLoad (fn) {
+    return function (offset, cb) {
+      if(length === null) waiting.push(function () { fn(offset, cb) })
+      else return fn(offset, cb)
+    }
+  }
+
+  // the cache slows things down a surprising amount!
+  // an entire scan in 1.76 seconds, vs > 2.5 seconds.
+  var last_index = -1, last_buffer
+  var blocks = cache; //new WeakMap()
+
+  function getBlock (i,  cb) {
+    if(i === last_index)
+      return cb(null, last_buffer)
+    if(DO_CACHE && blocks.get(i))
+      return cb(null, blocks.get(i))
+
+    var file_start = i*block
+    //insert cache here...
+
+    if(file_start == state.start)
+      return cb(null, state.buffers[0])
+
+    raf.read(file_start, Math.min(block, length-file_start), function (err, buffer) {
+      if(err) return setTimeout(function () {
+        getBlock(i, cb)
+      }, 200)
+      if(DO_CACHE) blocks.set(i, buffer)
+      last_index = i; last_buffer = buffer;
+      cb(err, buffer)
+    })
+  }
+
+  function callback(cb, buffer, start, length, offset) {
+    cb(null,
+      //I did consider just returning the whole buffer + start + length,
+      //then let the reader treat that as pointers, but it didn't
+      //actually measure to be faster.
+      codec.decode(buffer.slice(start, start+length)),
+      start,
+      length,
+      offset
+    )
+  }
+
+  function get (offset, cb) {
+    //read the whole block
+    if(offset >= length) return cb()
+    var block_start = offset%block
+    var file_start = offset - block_start
+    getBlock(~~(offset/block), function (err, buffer) {
+      if(err) return cb(err)
+      var length = buffer.readUInt16LE(block_start)
+      //if this is last item in block, jump to start of next block.
+      if(length === block-1) //wouldn't zero be better?
+        get(file_start+block, cb)
+      else
+        callback(cb, buffer, block_start+2, length, offset)
+    })
+  }
+
+  var write_timer
+  var w = 0
+  function next_write () {
+    state = Append.writable(state)
+    var buffer = Append.getWritable(state)
+    raf.write(state.written, buffer, function (err, v) {
+      if(err) throw err
+      var w = state.written
+      state = Append.written(state)
+
+      return schedule_next_write()
+    })
+  }
+
+  function schedule_next_write () {
+    if(Append.isWriting(state)) return
+    if(Append.hasWholeWrite(state)) {
+      clearTimeout(write_timer)
+      next_write()
+    } else if(Append.hasWrite(state)) {
+      clearTimeout(write_timer)
+      write_timer = setTimeout(next_write, 20)
+    } else {
+      //TODO: some views could be eager, updating before the log is fully persisted
+      //      just don't write the view data until the log is confirmed.
+      if(self.streams.length) {
+        for(var i = 0; i < self.streams.length; i++)
+          if(!self.streams[i].ended)
+            self.streams[i].resume()
+      }
+      while(waitingDrain.length)
+        waitingDrain.shift()()
+    }
+  }
+
+  function _append(data) {
+    data = codec.encode(data)
+    if('string' == typeof data)
+      data = Buffer.from(data)
+    state = Append.append(state, data)
+
+  }
+
+  function append(data, cb) {
+    if(Array.isArray(data)) {
+      for(var i = 0; i < data.length; i++)
+        _append(data[i])
+    } else
+      _append(data)
+
+    self.length = length = state.offset
+    schedule_next_write()
+    self.onWrite(state.offset)
+    cb(null, state.offset)
+  }
+
+  return self = {
+    filename: file,
+    block: block,
+    length: null,
+    appendState: state,
+    codec: codec,
+    getBlock: onLoad(getBlock),
+    get: onLoad(get),
+
+    getPrevious: onLoad(function (offset, cb) {
+      var block_start = offset%block
+      var file_start = offset - block_start
+      if(block_start === 0) {
+        file_start = file_start - block //read the previous block!
+        getBlock(~~(offset/block)-1, function (err, buffer) {
+          block_start = buffer.readUInt32LE(block-4)
+          var length = buffer.readUInt16LE(block_start-2)
+          callback(cb, buffer, block_start-2-length, length, offset)
+        })
+      }
+      else {
+        getBlock(~~(offset/block), function (err, buffer) {
+          var length = buffer.readUInt16LE(block_start-2)
+          callback(cb, buffer, block_start-2-length, length, offset)
+        })
+      }
+    }),
+
+  /*
+    getNext: onLoad(function (offset, cb) {
+      var block_start = offset%block
+      var file_start = offset - block_start
+      getBlock(~~(offset/block), function (err, buffer) {
+        if(err) return cb(err)
+
+        var length = buffer.readUInt16LE(block_start)
+        if(length == block-1)
+          get(file_start + block, cb)
+        else
+          get(offset+length+4, cb)
+      })
+
+    }),
+  */
+    onReady: function (fn) {
+      if(this.length != null) return fn()
+      waiting.push(fn)
+    },
+
+    append: onLoad(append),
+
+    stream: function (opts) {
+      var stream = new Stream(this, opts)
+      if(opts && opts.live)
+        this.streams.push(stream)
+      return stream
+    },
+
+    streams: [],
+
+    onWrite: function () {},
+
+    onDrain: onLoad(function (fn) {
+      if(!Append.hasWrite(state)) fn()
+      else waitingDrain.push(fn)
+    })
+  }
+}
+}
+
+
+
+}).call(this,require("buffer").Buffer)
+},{"./append":49,"./stream":59,"buffer":2}],53:[function(require,module,exports){
+arguments[4][8][0].apply(exports,arguments)
+},{"dup":8}],54:[function(require,module,exports){
+(function (Buffer){
+
+exports.compare = function (a, b) {
+
+  if(Buffer.isBuffer(a)) {
+    var l = Math.min(a.length, b.length)
+    for(var i = 0; i < l; i++) {
+      var cmp = a[i] - b[i]
+      if(cmp) return cmp
+    }
+    return a.length - b.length
+  }
+
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+// to be compatible with the current abstract-leveldown tests
+// nullish or empty strings.
+// I could use !!val but I want to permit numbers and booleans,
+// if possible.
+
+function isDef (val) {
+  return val !== undefined && val !== ''
+}
+
+function has (range, name) {
+  return Object.hasOwnProperty.call(range, name)
+}
+
+function hasKey(range, name) {
+  return Object.hasOwnProperty.call(range, name) && name
+}
+
+var lowerBoundKey = exports.lowerBoundKey = function (range) {
+    return (
+       hasKey(range, 'gt')
+    || hasKey(range, 'gte')
+    || hasKey(range, 'min')
+    || (range.reverse ? hasKey(range, 'end') : hasKey(range, 'start'))
+    || undefined
+    )
+}
+
+var lowerBound = exports.lowerBound = function (range, def) {
+  var k = lowerBoundKey(range)
+  return k ? range[k] : def
+}
+
+var lowerBoundInclusive = exports.lowerBoundInclusive = function (range) {
+  return has(range, 'gt') ? false : true
+}
+
+var upperBoundInclusive = exports.upperBoundInclusive =
+  function (range) {
+    return (has(range, 'lt') /*&& !range.maxEx*/) ? false : true
+  }
+
+var lowerBoundExclusive = exports.lowerBoundExclusive =
+  function (range) {
+    return !lowerBoundInclusive(range)
+  }
+
+var upperBoundExclusive = exports.upperBoundExclusive =
+  function (range) {
+    return !upperBoundInclusive(range)
+  }
+
+var upperBoundKey = exports.upperBoundKey = function (range) {
+    return (
+       hasKey(range, 'lt')
+    || hasKey(range, 'lte')
+    || hasKey(range, 'max')
+    || (range.reverse ? hasKey(range, 'start') : hasKey(range, 'end'))
+    || undefined
+    )
+}
+
+var upperBound = exports.upperBound = function (range, def) {
+  var k = upperBoundKey(range)
+  return k ? range[k] : def
+}
+
+exports.start = function (range, def) {
+  return range.reverse ? upperBound(range, def) : lowerBound(range, def)
+}
+exports.end = function (range, def) {
+  return range.reverse ? lowerBound(range, def) : upperBound(range, def)
+}
+exports.startInclusive = function (range) {
+  return (
+    range.reverse
+  ? upperBoundInclusive(range)
+  : lowerBoundInclusive(range)
+  )
+}
+exports.endInclusive = function (range) {
+  return (
+    range.reverse
+  ? lowerBoundInclusive(range)
+  : upperBoundInclusive(range)
+  )
+}
+
+function id (e) { return e }
+
+exports.toLtgt = function (range, _range, map, lower, upper) {
+  _range = _range || {}
+  map = map || id
+  var defaults = arguments.length > 3
+  var lb = exports.lowerBoundKey(range)
+  var ub = exports.upperBoundKey(range)
+  if(lb) {
+    if(lb === 'gt') _range.gt = map(range.gt, false)
+    else            _range.gte = map(range[lb], false)
+  }
+  else if(defaults)
+    _range.gte = map(lower, false)
+
+  if(ub) {
+    if(ub === 'lt') _range.lt = map(range.lt, true)
+    else            _range.lte = map(range[ub], true)
+  }
+  else if(defaults)
+    _range.lte = map(upper, true)
+
+  if(range.reverse != null)
+    _range.reverse = !!range.reverse
+
+  //if range was used mutably
+  //(in level-sublevel it's part of an options object
+  //that has more properties on it.)
+  if(has(_range, 'max'))   delete _range.max
+  if(has(_range, 'min'))   delete _range.min
+  if(has(_range, 'start')) delete _range.start
+  if(has(_range, 'end'))   delete _range.end
+
+  return _range
+}
+
+exports.contains = function (range, key, compare) {
+  compare = compare || exports.compare
+
+  var lb = lowerBound(range)
+  if(isDef(lb)) {
+    var cmp = compare(key, lb)
+    if(cmp < 0 || (cmp === 0 && lowerBoundExclusive(range)))
+      return false
+  }
+
+  var ub = upperBound(range)
+  if(isDef(ub)) {
+    var cmp = compare(key, ub)
+    if(cmp > 0 || (cmp === 0) && upperBoundExclusive(range))
+      return false
+  }
+
+  return true
+}
+
+exports.filter = function (range, compare) {
+  return function (key) {
+    return exports.contains(range, key, compare)
+  }
+}
+
+
+
+}).call(this,{"isBuffer":require("../../../../.nvm/versions/node/v8.11.4/lib/node_modules/browserify/node_modules/is-buffer/index.js")})
+},{"../../../../.nvm/versions/node/v8.11.4/lib/node_modules/browserify/node_modules/is-buffer/index.js":5}],55:[function(require,module,exports){
+
+module.exports = function (filter) {
+  var value = null, listeners = [], oncers = []
+  function trigger (_value) {
+    value = _value
+    var length = listeners.length
+    for(var i = 0; i< length && value === _value; i++) {
+      var listener = listeners[i](value)
+      //if we remove a listener, must decrement i also
+    }
+    // decrement from length, incase a !immediately
+    // listener is added during a trigger
+    var l = oncers.length
+    var _oncers = oncers
+    oncers = []
+    while(l-- && _value === value) {
+      _oncers.shift()(value)
+    }
+  }
+
+  function many (ready, immediately) {
+    var i = listeners.push(ready) - 1
+    if(value !== null && immediately !== false) ready(value)
+    return function () { //manually remove...
+      //fast path, will happen if an earlier listener has not been removed.
+      if(listeners[i] !== ready)
+        i = listeners.indexOf(ready)
+      listeners.splice(i, 1)
+    }
+  }
+
+  many.set = function (_value) {
+    if(filter ? filter(value, _value) : true) trigger(many.value = _value)
+    return many
+  }
+
+  many.once = function (once, immediately) {
+    if(value !== null && immediately !== false) {
+      once(value)
+      return function () {}
+    }
+    else {
+      var i = oncers.push(once) - 1
+      return function () {
+        if(oncers[i] !== once)
+          i = oncers.indexOf(once)
+      }
+    }
+  }
+
+  return many
+}
+
+
+
+},{}],56:[function(require,module,exports){
+var looper = require('looper')
+
+module.exports = function (read) {
+  var _abort, _cb
+  var loop = looper(function () {
+    read(_abort, _cb)
+  })
+  return function (abort, cb) {
+    _abort = abort
+    _cb = cb
+    loop()
+  }
+}
+
+},{"looper":53}],57:[function(require,module,exports){
+'use strict'
+var looper = require('pull-looper')
+module.exports = function (push, length, done) {
+  var abort_cb, ended, buffer = [], _cb
+  length = length || 0
+
+  var adapter = {
+    paused: false,
+    write: function (data) {
+      if(_cb) {
+        var cb = _cb; _cb = null; cb(null, data)
+      }
+      else {
+        buffer.push(data)
+        if(buffer.length > length) {
+          adapter.paused = true
+        }
+      }
+    },
+    end: function (err) {
+      ended = err || true
+      if(_cb && (err || !buffer.length)) {
+        var cb = _cb; _cb = null; cb(ended)
+        if(done) {
+          var _done = done; done = null; _done(err)
+        }
+      }
+    },
+    source: null
+  }
+
+  push.pipe(adapter)
+
+  return looper(function (abort, cb) {
+    if(_cb && !abort) {
+      throw new Error('source:read twice')
+    }
+
+    if(abort) {
+      push.abort(abort)
+//      abort_cb = cb
+      cb(abort)
+    }
+    // if it ended with an error, cb immedately, dropping the buffer
+    else if(ended && ended !== true) {
+      cb(ended)
+      if(done) {
+        var _done = done; done = null; _done(ended)
+      }
+    }
+    // else read the buffer
+    else if(buffer.length) {
+      var data = buffer.shift()
+      cb(null, data)
+      if(buffer.length <= length/2 && adapter.paused) {
+        adapter.paused = false
+        push.resume()
+      }
+    }
+    else if(ended === true) {
+      cb(true)
+      if(done) {
+        var _done = done; done = null; _done()
+      }
+    }
+    else _cb = cb
+  })
+}
+
+
+},{"pull-looper":56}],58:[function(require,module,exports){
+
+/*
+A push stream pipeline is a doublely linked list.
+data (write/end) travels one way, and signals (pause/resume/abort) travels the other way.
+
+when you pipe to a stream, if it already has a source, find the first
+source and pipe to that. this makes a.pipe(b.pipe(c) work, or a.pipe(b)
+
+also, duplex streams (which, like in pull streams, are a pair {source, sink} streams)
+
+*/
+
+module.exports = function pipe (sink) {
+  var _sink = sink
+  while(sink.source) sink = sink.source
+  this.sink = sink
+  sink.source = this
+  if(!sink.paused) this.resume()
+  return _sink
+}
+
+
+
+},{}],59:[function(require,module,exports){
+var ltgt = require('ltgt')
+var frame = require('./frame')
+module.exports = Stream
+
+function Stream (blocks, opts) {
+  opts = opts || {}
+  this.reverse = !!opts.reverse
+  this.live = !!opts.live
+  this.blocks = blocks
+  this.cursor = -1 //this.start = this.end = -1
+  this.seqs = opts.seqs !== false
+  this.values = opts.values !== false
+  this.limit = opts.limit || 0
+  this.count = 0
+
+  this.min = this.max = this.min_inclusive = this.max_inclusive = null
+
+  var self = this
+  this.opts = opts
+  this.blocks.onReady(this._ready.bind(this))
+}
+
+Stream.prototype._ready = function () {
+  this.min = ltgt.lowerBound(this.opts, null)
+  if(ltgt.lowerBoundInclusive(this.opts))
+    this.min_inclusive = this.min
+
+  this.max = ltgt.upperBound(this.opts, null)
+  if(ltgt.upperBoundInclusive(this.opts))
+    this.max_inclusive = this.max
+
+  //note: cursor has default of the current length or zero.
+  if(this.reverse)
+    this.cursor = ltgt.upperBound(this.opts, this.blocks.length)
+  else
+    this.cursor = ltgt.lowerBound(this.opts, 0)
+
+  if(this.cursor < 0) this.cursor = 0
+
+  var self = this
+  this.blocks.getBlock(~~(this.cursor/self.blocks.block), function (err, buffer) {
+    self._buffer = buffer
+    //reversing cursor starts at length, which won't be a thing.
+    self.resume()
+  })
+}
+
+Stream.prototype._next = function () {
+  if(!this._buffer || this.cursor === -1 || this.isAtEnd()) return
+  var block = this.blocks.block
+  var next_block
+  if(!this.reverse) {
+    var result = frame.getRecord(block, this._buffer, this.cursor)
+    if(result) {
+      this.cursor += result.length + 4
+      return result
+    } else {
+      //move to start of next block
+      this.cursor = (this.cursor - this.cursor%block)+block
+      if(this.cursor < this.blocks.length) {
+        //sometimes this is sync, which means we can actually return instead of cb
+        //if we always cb, we can get two resume loops going, which is weird.
+        next_block = ~~(this.cursor/block)
+      }
+      else
+        return
+    }
+  }
+  else {
+    if(this.cursor % block) {
+      //get the previous record, unless this is the first item
+      //in a lte stream.
+      if(!(this.count === 0 && this.max_inclusive === this.cursor)) {
+        this.cursor = frame.getPreviousRecord(block, this._buffer, this.cursor)
+      }
+      var result = frame.getRecord(block, this._buffer, this.cursor)
+      return result
+    }
+    else {
+      var current_block = ~~(this.cursor/block)
+      next_block = ~~(this.cursor/block)-1
+      if(current_block === next_block)
+        throw new Error('failed to decrement block')
+    }
+  }
+  var self = this, async = false, returned = false
+  if(next_block >= 0)
+    this.blocks.getBlock(next_block, function (err, buffer) {
+      //if(err) return self.abort(err)
+      self._buffer = buffer
+      returned = true
+      if(self.reverse) {
+        //point to the end of the blocks, in the newly retrived block
+        self.cursor = next_block*block + buffer.readUInt32LE(block - 4)
+      }
+      if(async) self.resume()
+    })
+  async = true
+  if(returned) return self._next()
+}
+
+Stream.prototype.isAtEnd = function () {
+  return this.reverse ? this.cursor <= 0 : this.cursor >= this.blocks.length
+}
+
+
+Stream.prototype._format = function (result) {
+  if(this.values) {
+    var value = this.blocks.codec.decode(this._buffer.slice(result.start, result.start + result.length))
+    if(this.seqs) this.sink.write({seq: result.offset, value: value})
+    else this.sink.write(value)
+  }
+  else
+    this.sink.write(result.offset)
+}
+
+Stream.prototype.resume = function () {
+  if(this.ended) return
+  while(this.sink && !this.sink.paused && !this.ended) {
+    var result = this._next()
+    if(result && result.length) {
+      var o = result.offset
+      this.count++
+      if(
+        (this.min === null || this.min < o || this.min_inclusive === o) &&
+        (this.max === null || this.max > o || this.max_inclusive === o)
+      ) {
+        this._format(result)
+      }
+      else {
+        if(this.limit > 0 && this.count >= this.limit) {
+          this.abort(); this.sink.end()
+        }
+      }
+    }
+    else if(!this.live && (result ? result.length == 0 : this.isAtEnd())) {
+      if(this.ended) throw new Error('already ended')
+      this.abort()
+      return
+    }
+    else
+      return
+
+  }
+}
+
+Stream.prototype.abort = function (err) {
+  //only thing to do is unsubscribe from live stream.
+  //but append isn't implemented yet...
+  this.ended = err || true
+  this.blocks.streams.splice(this.blocks.streams.indexOf(this), 1)
+  if(!this.sink.ended)
+    this.sink.end(err === true ? null : err)
+}
+
+Stream.prototype.pipe = require('push-stream/pipe')
+
+
+
+
+
+
+
+},{"./frame":51,"ltgt":54,"push-stream/pipe":58}]},{},[41]);
